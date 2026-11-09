@@ -1,0 +1,19 @@
+{
+  "name": "mtg-table",
+  "version": "0.1.0",
+  "description": "Self-hosted video table for remote Magic: The Gathering",
+  "scripts": {
+    "setup": "node scripts/setup.js",
+    "invite": "node scripts/invite.js",
+    "start": "node server/index.js"
+  },
+  "author": "",
+  "license": "UNLICENSED",
+  "dependencies": {
+    "livekit-client": "^2.23.0",
+    "livekit-server-sdk": "^2.19.2",
+    "selfsigned": "^5.5.0"
+  },
+  "private": true,
+  "type": "module"
+}

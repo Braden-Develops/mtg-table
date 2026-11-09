@@ -1,0 +1,196 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>MTG Table</title>
+  <link rel="stylesheet" href="/static/style.css">
+</head>
+<body>
+  <!-- Lobby: pick camera and quality, check the preview, then join -->
+  <main id="lobby" class="center-card wide">
+    <h1>MTG Table</h1>
+    <p id="greeting" class="muted">Checking your invite…</p>
+
+    <div id="lobby-body" hidden>
+      <div class="preview-wrap">
+        <video id="preview" autoplay muted playsinline></video>
+        <div id="preview-info" class="overlay-stats"></div>
+      </div>
+
+      <div class="form-grid">
+        <label>Camera
+          <select id="camera-select"></select>
+        </label>
+        <label>Microphone
+          <select id="mic-select"></select>
+        </label>
+        <label>Video quality
+          <select id="quality-select">
+            <option value="1080-5">1080p · 5 Mbps (best)</option>
+            <option value="1080-3">1080p · 3 Mbps</option>
+            <option value="720-2">720p · 2.5 Mbps</option>
+          </select>
+        </label>
+      </div>
+
+      <button id="join-btn" class="primary">Join table</button>
+    </div>
+
+    <p id="lobby-error" class="error" hidden></p>
+  </main>
+
+  <!-- Room -->
+  <div id="room" hidden>
+    <header class="toolbar">
+      <span id="room-title" class="room-title"></span>
+      <div class="toolbar-buttons">
+        <button id="pass-btn" title="End your turn and pass to the next player">Pass turn</button>
+        <button id="game-btn" title="Turn order, monarch, game mode, new game and log">Game</button>
+        <button id="deck-btn" title="Load your deck list and view other players' decks">Decks</button>
+        <button id="mic-btn" title="Mute or unmute your microphone">Mute</button>
+        <button id="cam-btn" title="Turn your camera on or off">Camera off</button>
+        <button id="cam-settings-btn" title="Brightness, contrast, sharpening and camera focus for your video">Picture</button>
+        <button id="stats-btn" title="Show or hide video stats">Hide stats</button>
+        <button id="leave-btn" class="danger">Leave</button>
+      </div>
+    </header>
+    <nav class="tools" aria-label="Table tools">
+      <div class="tool-group">
+        <button data-tool="select" class="on" title="Click videos to enlarge them; click stickers to edit">Select</button>
+        <button data-tool="sticker" title="Click a spot on a video to add a sticker (P/T, counters, cards)">Sticker</button>
+        <button data-tool="pen" title="Draw freehand on a video">Pen</button>
+        <button data-tool="arrow" title="Drag to draw an arrow">Arrow</button>
+        <button data-tool="eraser" title="Click or drag over drawings and arrows to erase them">Eraser</button>
+        <span class="pen-style">
+          <span class="swatches" id="swatches"></span>
+          <input id="draw-color" type="color" title="Pick any drawing color">
+          <select id="draw-size" title="Line thickness">
+            <option value="0.5">Thin</option>
+            <option value="1" selected>Medium</option>
+            <option value="2">Thick</option>
+            <option value="3.5">Marker</option>
+          </select>
+        </span>
+      </div>
+      <div class="tool-group">
+        <button id="find-card-btn" title="Look up a card on Scryfall and place it as a sticker">Find card</button>
+        <button id="keep-btn" title="Choose whether new drawings fade after 20 seconds">Drawings fade</button>
+        <button id="clear-mine-btn" title="Erase everything you've drawn">Clear my drawings</button>
+        <label class="size-ctl" title="Sticker size on your screen only">Sticker size
+          <input id="sticker-size" type="range" min="50" max="200" step="10" value="100">
+          <output id="sticker-size-out">100%</output>
+        </label>
+        <button id="names-btn" title="Show or hide card names and labels on stickers (your screen only)">Names on</button>
+        <button id="hide-marks-btn" title="Hide stickers and drawings on your screen only">Hide marks</button>
+      </div>
+    </nav>
+    <div id="place-banner" class="place-banner" hidden>
+      <span id="place-text"></span>
+      <button id="place-cancel">Cancel</button>
+    </div>
+
+    <div class="room-body">
+      <div class="room-main">
+        <p class="hint">Click a player's video to enlarge it. Double-click for full screen. Life, stickers and drawings are shared with everyone.</p>
+        <section id="grid" class="grid"></section>
+      </div>
+
+      <aside id="game-panel" class="game-panel" hidden>
+        <div class="panel-head">
+          <h2>Game</h2>
+          <button id="panel-close" title="Close">✕</button>
+        </div>
+        <p id="round-info" class="muted"></p>
+
+        <h3>Turn order</h3>
+        <ol id="order-list" class="order-list"></ol>
+        <button id="shuffle-btn">Randomize turn order</button>
+
+        <h3>New game</h3>
+        <div class="new-game">
+          <select id="game-mode" title="Game mode">
+            <option value="commander">Commander (40 life, commander damage)</option>
+            <option value="brawl">Brawl (25 life 1v1, 30 multiplayer)</option>
+            <option value="standard">Standard (20 life)</option>
+          </select>
+          <select id="start-life" title="Starting life (filled in from the mode)">
+            <option value="40">40 life</option>
+            <option value="30">30 life</option>
+            <option value="25">25 life</option>
+            <option value="20">20 life</option>
+          </select>
+          <button id="new-game-btn">Start new game</button>
+        </div>
+
+        <h3>Table marks</h3>
+        <div class="new-game">
+          <button id="clear-stickers-btn">Clear all stickers</button>
+          <button id="clear-drawings-btn">Clear all drawings</button>
+        </div>
+
+        <h3>Log</h3>
+        <ul id="game-log" class="game-log"></ul>
+      </aside>
+
+      <aside id="deck-panel" class="game-panel" hidden>
+        <div class="panel-head">
+          <h2>Decks</h2>
+          <button id="deck-close" title="Close">✕</button>
+        </div>
+        <div id="deck-tabs" class="deck-tabs"></div>
+        <input id="deck-search" class="deck-search" type="search" placeholder="Search this deck (name or type)…" autocomplete="off">
+        <div id="deck-body"></div>
+      </aside>
+    </div>
+  </div>
+
+  <!-- Sticker editor / card lookup -->
+  <dialog id="sticker-dialog" class="sticker-dialog">
+    <div class="dialog-head">
+      <h2 id="sticker-title">Sticker</h2>
+    </div>
+    <div id="sticker-body"></div>
+    <div class="dialog-foot">
+      <button id="sticker-delete" class="danger-text">Delete sticker</button>
+      <button id="sticker-done" class="primary">Done</button>
+    </div>
+  </dialog>
+
+  <!-- Paste a deck list -->
+  <dialog id="deck-dialog" class="sticker-dialog">
+    <div class="dialog-head"><h2>Load your deck</h2></div>
+    <div class="deck-dialog-body">
+      <p class="muted small">Paste a list exported from Moxfield, Archidekt, MTG Arena or similar: one card per line, like
+        <code>1 Sol Ring</code>. Put your commander under a <code>Commander</code> heading to set it automatically.</p>
+      <textarea id="deck-text" rows="14" placeholder="Commander&#10;1 Atraxa, Praetors' Voice&#10;&#10;Deck&#10;1 Sol Ring&#10;1 Arcane Signet&#10;..."></textarea>
+      <p id="deck-status" class="muted small"></p>
+    </div>
+    <div class="dialog-foot">
+      <button id="deck-cancel">Cancel</button>
+      <button id="deck-load" class="primary">Load deck</button>
+    </div>
+  </dialog>
+
+  <!-- Your camera's picture and hardware settings -->
+  <dialog id="camera-dialog" class="sticker-dialog">
+    <div class="dialog-head"><h2>Your camera picture</h2></div>
+    <div id="camera-body" class="camera-body"></div>
+    <div class="dialog-foot">
+      <button id="camera-reset">Reset all</button>
+      <button id="camera-close" class="primary">Done</button>
+    </div>
+  </dialog>
+
+  <!-- Large card image when hovering a card sticker -->
+  <div id="card-preview" class="card-preview" hidden><img alt=""></div>
+
+  <script src="/vendor/livekit-client.js"></script>
+  <script src="/static/picture.js"></script>
+  <script src="/static/adjust.js"></script>
+  <script src="/static/marks.js"></script>
+  <script src="/static/decks.js"></script>
+  <script src="/static/game.js"></script>
+  <script src="/static/app.js"></script>
+</body>
+</html>
