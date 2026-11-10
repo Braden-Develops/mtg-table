@@ -9,7 +9,8 @@
 #   secret "mtg-livekit-secret" (a new random value made here; nobody sees it),
 #   secret "mtg-discord-token" (placeholder; the host page fills it in),
 #   dynamic group "mtg-table" (the VM named mtg-table) and policy "mtg-table-secrets"
-#   letting only that VM read those secrets and update the Discord token.
+#   letting only that VM read those secrets and update the Discord token (it may also list secret
+#   names, never their contents, to find its vault).
 # Safe to run again.
 set -euo pipefail
 
@@ -71,7 +72,7 @@ fi
 
 say "Policy"
 STATEMENTS=$(cat <<EOF
-["Allow dynamic-group mtg-table to read vaults in tenancy where target.vault.id = '$VAULT'",
+["Allow dynamic-group mtg-table to inspect secrets in tenancy",
  "Allow dynamic-group mtg-table to read secret-bundles in tenancy where target.vault.id = '$VAULT'",
  "Allow dynamic-group mtg-table to use secrets in tenancy where target.vault.id = '$VAULT'",
  "Allow dynamic-group mtg-table to use keys in tenancy where target.key.id = '$KEY'"]
