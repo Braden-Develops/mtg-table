@@ -28,8 +28,15 @@ healthy() {
   return 1
 }
 
+# Caddy's access log: new files land in group $APP_USER (setgid folder), so the app can read them.
+caddy_logs() {
+  install -d -o caddy -g "$APP_USER" -m 2750 /var/log/caddy
+  chgrp "$APP_USER" /var/log/caddy/* 2>/dev/null || true
+}
+
 # Web server and fail2ban settings: both reload without dropping anyone.
 install_extras() {
+  caddy_logs
   install -m 644 deploy/fail2ban/filter.conf /etc/fail2ban/filter.d/mtg-host.conf
   install -m 644 deploy/fail2ban/jail.conf /etc/fail2ban/jail.d/mtg-host.conf
   sed "s/{{DOMAIN}}/$DOMAIN/" deploy/Caddyfile > /etc/caddy/Caddyfile

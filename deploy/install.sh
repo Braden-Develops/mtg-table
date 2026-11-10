@@ -91,6 +91,8 @@ echo "== deploy command for GitHub (root-owned so the app user can't change it)"
 install -o root -g root -m 755 "$APP_DIR/deploy/mtg-deploy" /usr/local/sbin/mtg-deploy
 
 echo "== Caddy (HTTPS)"
+install -d -o caddy -g "$APP_USER" -m 2750 /var/log/caddy # the app reads the access log
+chgrp "$APP_USER" /var/log/caddy/* 2>/dev/null || true
 sed "s/{{DOMAIN}}/$DOMAIN/" "$APP_DIR/deploy/Caddyfile" > /etc/caddy/Caddyfile
 systemctl enable caddy
 systemctl reload caddy || systemctl restart caddy

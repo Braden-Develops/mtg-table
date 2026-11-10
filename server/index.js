@@ -17,6 +17,7 @@ import {
 import { autocomplete, namedCard } from './scryfall.js';
 import { allDeckCards, getDeck, loadDeck, removeDeck, roomDecks } from './decks.js';
 import { identify, indexCards, modelsAvailable } from './recognize.js';
+import { handleAccessLog, startAccessLog } from './accesslog.js';
 import { count, handleMetrics, noteToken, startMetrics } from './metrics.js';
 import { clearDiscord, discordStatus, handleDiscord, registerCommands, removeHost, saveDiscord, startBoard } from './discord.js';
 import { loadSecrets } from './secrets.js';
@@ -240,6 +241,7 @@ async function handle(req, res) {
   const BAD_LINK = 'This invite link is not valid. Ask the host for a new one.';
 
   if (handleMetrics(config, req, res, p, ip, send)) return;
+  if (handleAccessLog(config, req, res, p, url, ip, send)) return;
   if (await handleDiscord(config, req, res, p, { send, readBody })) return;
   if (await handleHost(config, req, res, p, { send, readBody, inviteUrl, extra: hostDiscord })) return;
 
@@ -479,6 +481,7 @@ if (config.discord?.appId && config.discord?.token) {
 }
 startBoard(config);
 startMetrics(config);
+if (config.metricsToken) startAccessLog();
 const onRequest = (req, res) => handle(req, res).catch((err) => {
   console.error(err);
   if (!res.headersSent) send(res, 500, { error: 'Server error' });

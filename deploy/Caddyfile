@@ -1,4 +1,34 @@
 # MTG Table behind Caddy. Caddy gets and renews the Let's Encrypt certificate by itself.
+{
+	# Every request, to the site and to the bare IP (scanners), goes to one JSON file. The app tails it
+	# and hands it to Grafana through /logs/access (same token as /metrics). Invite codes are hashed and
+	# video tokens removed before anything is written; Caddy already hides cookies and Authorization.
+	log access {
+		output file /var/log/caddy/access.log {
+			roll_size 50MiB
+			roll_keep 5
+			mode 0640
+		}
+		format filter {
+			wrap json
+			fields {
+				request>uri query {
+					hash code
+					delete access_token
+					delete token
+				}
+				request>headers>Sec-Websocket-Protocol delete
+				request>tls delete
+				resp_headers delete
+			}
+		}
+		include http.log.access
+	}
+	log default {
+		exclude http.log.access
+	}
+}
+
 {{DOMAIN}} {
 	encode zstd gzip
 	header {
@@ -6,7 +36,5 @@
 		-Server
 	}
 	reverse_proxy 127.0.0.1:8080
-	log {
-		output discard
-	}
+	log
 }
