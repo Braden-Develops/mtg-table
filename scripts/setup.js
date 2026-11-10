@@ -25,7 +25,8 @@ const host = argValue('--host') || existing.host || lan[0] || 'localhost';
 
 const config = {
   apiKey: existing.apiKey || 'mtg' + crypto.randomBytes(6).toString('hex'),
-  apiSecret: existing.apiSecret || crypto.randomBytes(32).toString('base64url'),
+  // With OCI Vault in use (scripts/vault.js) the secret is not kept here at all.
+  ...(existing.vault ? { vault: existing.vault } : { apiSecret: existing.apiSecret || crypto.randomBytes(32).toString('base64url') }),
   host,
   httpsPort: existing.httpsPort || 8443,
   livekitPort: existing.livekitPort || 7880,
@@ -37,6 +38,7 @@ const config = {
   behindProxy: existing.behindProxy || false,
   ...(existing.hostPassword ? { hostPassword: existing.hostPassword } : {}),
   ...(existing.metricsToken ? { metricsToken: existing.metricsToken } : {}),
+  ...(existing.discord ? { discord: existing.discord } : {}),
 };
 const domain = argValue('--domain');
 if (domain) {
@@ -59,8 +61,8 @@ rtc:
   tcp_port: ${config.rtcTcpPort}
   udp_port: ${config.rtcUdpPort}
   use_external_ip: ${config.behindProxy}
-keys:
-  ${config.apiKey}: ${config.apiSecret}
+${config.vault ? '# keys: passed in LIVEKIT_KEYS by the server (from OCI Vault)' : `keys:
+  ${config.apiKey}: ${config.apiSecret}`}
 room:
   empty_timeout: 300
   max_participants: ${config.maxPlayers}

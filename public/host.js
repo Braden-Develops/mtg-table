@@ -179,7 +179,63 @@
     show('login');
   });
 
+  // ---------- Discord bot ----------
+  function showDiscord(s) {
+    const ready = s.appId && s.publicKeySet && s.tokenSet;
+    $('dc-status').textContent = !ready ? 'Not set up'
+      : !s.ownerId ? 'Waiting for your user ID'
+        : s.registeredAt ? 'Ready' : 'Commands not registered';
+    $('dc-endpoint').textContent = s.endpoint;
+    $('dc-app').value = s.appId;
+    $('dc-owner').value = s.ownerId;
+    $('dc-key').placeholder = s.publicKeySet ? 'Saved (paste to replace)' : '64 letters and numbers';
+    $('dc-token').placeholder = s.tokenSet ? 'Saved (paste to replace)' : 'From the Bot page';
+    $('dc-key').value = '';
+    $('dc-token').value = '';
+    for (const id of ['dc-install-server', 'dc-install-user']) {
+      const a = $(id);
+      const url = id.endsWith('server') ? s.installServer : s.installUser;
+      if (url) a.href = url; else a.removeAttribute('href');
+    }
+    $('dc-register').disabled = !(s.appId && s.tokenSet);
+    $('dc-clear').hidden = !(s.appId || s.publicKeySet || s.tokenSet);
+  }
+  function discordMsg(text, bad) {
+    $('dc-msg').textContent = text;
+    $('dc-msg').className = `small ${bad ? 'error' : 'muted'}`;
+    $('dc-msg').hidden = !text;
+  }
+  async function loadDiscord() {
+    try {
+      showDiscord(await api('/api/host/discord'));
+    } catch { /* logged out */ }
+  }
+  async function discordCall(path, body, done) {
+    discordMsg('Working...');
+    try {
+      const r = await api(path, body);
+      showDiscord(r.status);
+      if (r.registered?.error) return discordMsg(r.registered.error, true);
+      discordMsg(done(r));
+    } catch (err) {
+      discordMsg(err.message, true);
+    }
+  }
+  $('dc-form').addEventListener('submit', (e) => {
+    e.preventDefault();
+    discordCall('/api/host/discord', {
+      appId: $('dc-app').value, publicKey: $('dc-key').value, token: $('dc-token').value, ownerId: $('dc-owner').value,
+    }, (r) => (r.registered?.ok ? 'Saved, and the commands are registered with Discord.' : 'Saved.'));
+  });
+  $('dc-register').addEventListener('click', () => discordCall('/api/host/discord/register', {}, () => 'Commands registered with Discord.'));
+  $('dc-clear').addEventListener('click', (e) => {
+    if (!armed(e.currentTarget, 'Sure? Forgets the token')) return;
+    discordCall('/api/host/discord/clear', {}, () => 'Bot settings removed. Clear the endpoint URL in the Developer Portal too.');
+  });
+  $('dc-copy-endpoint').addEventListener('click', (e) => copy($('dc-endpoint').textContent, e.currentTarget));
+
   function start() {
+    loadDiscord();
     refresh();
     clearInterval(timer);
     timer = setInterval(() => { if (!document.hidden) refresh(); }, 10_000);

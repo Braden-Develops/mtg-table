@@ -992,7 +992,24 @@ body.dragging-card, body.dragging-card * { cursor: grabbing !important; }
 .host-invites .acts { display: flex; gap: var(--sp-2); flex-shrink: 0; }
 .dot { width: 8px; height: 8px; border-radius: 50%; background: var(--faint); flex-shrink: 0; display: inline-block; }
 .dot.on { background: var(--green); box-shadow: 0 0 0 3px rgba(111, 207, 151, .2); }
+.host-discord summary { display: flex; align-items: baseline; justify-content: space-between; gap: var(--sp-3); cursor: pointer; list-style: none; }
+.host-discord summary::-webkit-details-marker { display: none; }
+.host-discord summary h3 { margin: 0; }
+.host-discord summary h3::before { content: '\25B8'; display: inline-block; margin-right: var(--sp-2); color: var(--muted); transition: transform .15s; }
+.host-discord[open] summary h3::before { transform: rotate(90deg); }
+.host-discord[open] summary { margin-bottom: var(--sp-3); }
+.host-discord code { font-family: ui-monospace, Consolas, monospace; font-size: .92em; background: var(--panel-2); padding: 1px 5px; border-radius: 4px; word-break: break-all; }
+.host-discord a { color: var(--accent); }
+.host-discord a:not([href]) { color: var(--faint); pointer-events: none; }
+.host-steps { color: var(--muted); padding-left: var(--sp-5); display: flex; flex-direction: column; gap: var(--sp-2); margin: var(--sp-3) 0 var(--sp-4); }
+.host-steps .chip { margin-left: var(--sp-1); vertical-align: middle; }
+.host-dc-form { display: grid; grid-template-columns: 1fr 1fr; gap: var(--sp-3); }
+.host-dc-form label { display: flex; flex-direction: column; gap: var(--sp-2); color: var(--muted); font-size: var(--fs-sm); font-weight: 550; }
+.host-dc-form input { font-family: ui-monospace, Consolas, monospace; font-size: var(--fs-sm); }
+.host-dc-acts { grid-column: 1 / -1; display: flex; gap: var(--sp-2); flex-wrap: wrap; }
+.host-discord #dc-msg { margin: var(--sp-3) 0 0; }
 @media (max-width: 680px) {
+  .host-dc-form { grid-template-columns: 1fr; }
   .host-wrap { padding: var(--sp-5) var(--sp-3); }
   .host-invite { grid-template-columns: 1fr 1fr; }
   .host-invite button { grid-column: 1 / -1; }

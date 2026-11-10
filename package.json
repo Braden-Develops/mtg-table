@@ -14,6 +14,9 @@
   "dependencies": {
     "livekit-client": "^2.23.0",
     "livekit-server-sdk": "^2.19.2",
+    "oci-common": "^2.146.0",
+    "oci-secrets": "^2.146.0",
+    "oci-vault": "^2.146.0",
     "onnxruntime-node": "^1.31.1",
     "onnxruntime-web": "1.31",
     "selfsigned": "^5.5.0",

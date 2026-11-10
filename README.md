@@ -124,6 +124,32 @@ Handy queries: hours per player this month,
 `sum by (name) (increase(mtg_player_connected_seconds_total[30d])) / 3600`; who is on now,
 `mtg_player_session_seconds / 60`.
 
+## Discord bot
+
+Send invite links from Discord instead of the host page: right-click a friend > Apps >
+**Invite to MTG table**, pick a table, and the bot DMs them the link (if it can't, you get the link and
+a button to post it in the chat you're in). Also `/invite`, `/links`, `/revoke` and `/who`. Only your
+Discord account can use them.
+
+Set it up from the **Discord bot** section at the bottom of the host page; it walks through the
+Developer Portal steps. Discord sends commands to `POST /api/discord`, signed with your application's
+key; unsigned or old requests are refused. Any existing bot application works.
+
+## Secrets in OCI Vault (Oracle server)
+
+On the Oracle server the LiveKit API secret (which also signs host logins) and the Discord bot token
+live in OCI Vault, not on disk. The server reads them at startup using the VM's own Oracle identity,
+so there is no vault password stored anywhere either.
+
+1. In the Oracle console, open Cloud Shell and run
+   `curl -fsSL https://raw.githubusercontent.com/Braden-Develops/mtg-table/main/deploy/oci-vault-setup.sh | bash`
+   (vault, key, secrets and an access policy for this VM only; all in the free tier).
+2. On the server: `sudo -u mtg node /opt/mtg-table/scripts/vault.js on`, then `sudo systemctl restart mtg-table`.
+
+`vault.js status` checks it; `vault.js off` copies the secrets back into `data/config.json`. If the
+vault can't be reached at startup the server retries for about 40 seconds, then exits and systemd
+tries again.
+
 ## Data folder
 
 `data/` holds secrets (API secret, certificate key, invite codes). It's in `.gitignore`. Never share it.

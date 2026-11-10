@@ -107,7 +107,7 @@ const clearCookie = `${COOKIE}=; Path=/; HttpOnly; SameSite=Strict; Max-Age=0`;
 
 // ---------- who is online (asks LiveKit) ----------
 let rooms = null;
-async function online(config) {
+export async function online(config) {
   rooms ??= new RoomServiceClient(`http://127.0.0.1:${config.livekitPort}`, config.apiKey, config.apiSecret);
   const out = new Map(); // room -> [names]
   try {
@@ -131,9 +131,48 @@ async function kick(config, room, name) {
   } catch { /* room not open */ }
 }
 
+// ---------- making and revoking links (host page and Discord bot) ----------
+// Returns { inv } or { error, clash }.
+export function makeInvite(config, { name, room, days, by = 'Host' }) {
+  name = String(name || '').trim();
+  room = String(room || '').trim();
+  days = Number(days) || 0;
+  if (!NAME_RE.test(name)) return { error: 'Names can be up to 32 letters, numbers, spaces, dots, dashes or apostrophes.' };
+  if (!ROOM_RE.test(room)) return { error: 'Table names can be up to 32 letters, numbers, dashes or underscores (no spaces).' };
+  const invites = loadInvites();
+  const clash = invites.find((i) => i.room === room && i.name.toLowerCase() === name.toLowerCase() && inviteActive(i));
+  if (clash) return { clash: true, error: `${clash.name} already has a working link at this table. Revoke it first to make a new one.` };
+  const inv = {
+    code: crypto.randomBytes(16).toString('base64url'),
+    name,
+    room,
+    createdAt: new Date().toISOString(),
+    expiresAt: days > 0 ? new Date(Date.now() + days * 86_400_000).toISOString() : null,
+    revoked: false,
+  };
+  invites.push(inv);
+  saveInvites(invites);
+  console.log(`${by} made an invite for ${name} at table ${room}`);
+  return { inv };
+}
+
+// Revokes a working link and disconnects the player. Returns the invite, or null.
+export async function revokeInvite(config, code, by = 'Host') {
+  const invites = loadInvites();
+  const inv = invites.find((i) => i.code === code);
+  if (!inv) return null;
+  inv.revoked = true;
+  inv.revokedAt = new Date().toISOString();
+  saveInvites(invites);
+  await kick(config, inv.room, inv.name);
+  console.log(`${by} revoked ${inv.name}'s invite at table ${inv.room}`);
+  return inv;
+}
+
 // ---------- routes ----------
 // Returns true when it handled the request.
-export async function handleHost(config, req, res, p, { send, readBody, inviteUrl }) {
+// `extra` handles more host-only routes (the Discord settings) after the login check.
+export async function handleHost(config, req, res, p, { send, readBody, inviteUrl, extra }) {
   if (!p.startsWith('/api/host/')) return false;
   const ip = clientIp(req);
 
@@ -196,6 +235,7 @@ export async function handleHost(config, req, res, p, { send, readBody, inviteUr
     send(res, 429, { error: 'Slow down.' });
     return true;
   }
+  if (extra && await extra(req, res, p, body)) return true;
 
   if (req.method === 'GET' && p === '/api/host/state') {
     const now = Date.now();
@@ -228,35 +268,12 @@ export async function handleHost(config, req, res, p, { send, readBody, inviteUr
 
   if (req.method === 'POST' && p === '/api/host/invite') {
     const b = await body();
-    const name = String(b?.name || '').trim();
-    const room = String(b?.room || '').trim();
-    const days = Number(b?.days) || 0;
-    if (!NAME_RE.test(name)) {
-      send(res, 400, { error: 'Names can be up to 32 letters, numbers, spaces, dots, dashes or apostrophes.' });
+    const made = makeInvite(config, { name: b?.name, room: b?.room, days: b?.days });
+    if (made.error) {
+      send(res, made.clash ? 409 : 400, { error: made.error });
       return true;
     }
-    if (!ROOM_RE.test(room)) {
-      send(res, 400, { error: 'Table names can be up to 32 letters, numbers, dashes or underscores (no spaces).' });
-      return true;
-    }
-    const invites = loadInvites();
-    const clash = invites.find((i) => i.room === room && i.name.toLowerCase() === name.toLowerCase() && inviteActive(i));
-    if (clash) {
-      send(res, 409, { error: `${clash.name} already has a working link at this table. Revoke it first to make a new one.` });
-      return true;
-    }
-    const inv = {
-      code: crypto.randomBytes(16).toString('base64url'),
-      name,
-      room,
-      createdAt: new Date().toISOString(),
-      expiresAt: days > 0 ? new Date(Date.now() + days * 86_400_000).toISOString() : null,
-      revoked: false,
-    };
-    invites.push(inv);
-    saveInvites(invites);
-    console.log(`Host made an invite for ${name} at table ${room}`);
-    send(res, 200, { url: inviteUrl(config, inv.code) });
+    send(res, 200, { url: inviteUrl(config, made.inv.code) });
     return true;
   }
 
@@ -271,11 +288,7 @@ export async function handleHost(config, req, res, p, { send, readBody, inviteUr
     if (p.endsWith('/remove')) {
       saveInvites(invites.filter((i) => i !== inv));
     } else {
-      inv.revoked = true;
-      inv.revokedAt = new Date().toISOString();
-      saveInvites(invites);
-      await kick(config, inv.room, inv.name);
-      console.log(`Host revoked ${inv.name}'s invite at table ${inv.room}`);
+      await revokeInvite(config, inv.code);
     }
     send(res, 204, '');
     return true;

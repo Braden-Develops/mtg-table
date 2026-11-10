@@ -18,6 +18,8 @@ import { autocomplete, namedCard } from './scryfall.js';
 import { allDeckCards, getDeck, loadDeck, removeDeck, roomDecks } from './decks.js';
 import { identify, indexCards, modelsAvailable } from './recognize.js';
 import { count, handleMetrics, noteToken, startMetrics } from './metrics.js';
+import { clearDiscord, discordStatus, handleDiscord, registerCommands, saveDiscord } from './discord.js';
+import { loadSecrets } from './secrets.js';
 import {
   clientIp, findInvite, handleHost, isHttps, overLimit, peek,
 } from './host.js';
@@ -42,6 +44,8 @@ import {
 } from '../scripts/lib.js';
 
 const config = loadConfig();
+// On the Oracle server the secrets come from OCI Vault, not the config file (see server/secrets.js).
+await loadSecrets(config);
 const PUBLIC_DIR = path.join(ROOT, 'public');
 const LIVEKIT_CLIENT = path.join(ROOT, 'node_modules', 'livekit-client', 'dist', 'livekit-client.umd.js');
 // Card tracking runs in each player's own browser (onnxruntime-web + the corner model), not here.
@@ -71,7 +75,9 @@ if (!process.argv.includes('--no-livekit')) {
     console.error(`LiveKit server not found at ${exe}. See README.md.`);
     process.exit(1);
   }
-  livekit = spawn(exe, ['--config', LIVEKIT_YAML], { stdio: ['ignore', 'pipe', 'pipe'] });
+  // With the vault in use, livekit.yaml has no keys; LiveKit gets them from the environment instead.
+  const env = config.vault ? { ...process.env, LIVEKIT_KEYS: `${config.apiKey}: ${config.apiSecret}` } : process.env;
+  livekit = spawn(exe, ['--config', LIVEKIT_YAML], { stdio: ['ignore', 'pipe', 'pipe'], env });
   const relay = (stream) => stream.on('data', (chunk) => {
     for (const line of chunk.toString().split(/\r?\n/)) {
       if (line.trim()) console.log('[livekit]', line);
@@ -234,7 +240,8 @@ async function handle(req, res) {
   const BAD_LINK = 'This invite link is not valid. Ask the host for a new one.';
 
   if (handleMetrics(config, req, res, p, ip, send)) return;
-  if (await handleHost(config, req, res, p, { send, readBody, inviteUrl })) return;
+  if (await handleDiscord(config, req, res, p, { send, readBody })) return;
+  if (await handleHost(config, req, res, p, { send, readBody, inviteUrl, extra: hostDiscord })) return;
 
   if (req.method === 'GET' && (p === '/' || p === '/index.html')) {
     return sendFile(res, path.join(PUBLIC_DIR, 'index.html'));
@@ -439,6 +446,26 @@ async function handle(req, res) {
   }
 
   send(res, 404, 'Not found', 'text/plain');
+}
+
+// Discord bot settings on the host page (only reached after the host login check).
+async function hostDiscord(req, res, p, body) {
+  if (!p.startsWith('/api/host/discord')) return false;
+  if (req.method === 'GET' && p === '/api/host/discord') {
+    send(res, 200, discordStatus(config));
+  } else if (req.method === 'POST' && p === '/api/host/discord') {
+    const result = await saveDiscord(config, await body());
+    send(res, result.error ? 400 : 200, { ...result, status: discordStatus(config) });
+  } else if (req.method === 'POST' && p === '/api/host/discord/register') {
+    const result = await registerCommands(config);
+    send(res, result.error ? 400 : 200, { ...result, status: discordStatus(config) });
+  } else if (req.method === 'POST' && p === '/api/host/discord/clear') {
+    await clearDiscord(config);
+    send(res, 200, { status: discordStatus(config) });
+  } else {
+    send(res, 404, { error: 'Not found' });
+  }
+  return true;
 }
 
 // ---------- start ----------

@@ -58,6 +58,40 @@
 
     <label class="host-toggle"><input id="show-old" type="checkbox"> Show revoked and expired links</label>
     <div id="tables"></div>
+
+    <details id="discord" class="host-card host-discord">
+      <summary>
+        <h3>Discord bot</h3>
+        <span id="dc-status" class="muted small"></span>
+      </summary>
+      <p class="muted small">Send invite links from Discord: right-click a friend &rsaquo; <b>Apps</b> &rsaquo;
+        <b>Invite to MTG table</b>, pick the table, and the bot DMs them the link. Also <code>/invite</code>,
+        <code>/links</code>, <code>/revoke</code> and <code>/who</code>. Only you can use them.</p>
+      <ol class="host-steps small">
+        <li>In the <a href="https://discord.com/developers/applications" target="_blank" rel="noopener">Discord Developer Portal</a>,
+          open your bot's application. Copy the <b>Application ID</b> and <b>Public Key</b> from General Information.</li>
+        <li>On the <b>Bot</b> page, press <b>Reset Token</b> and copy the new token.</li>
+        <li>Paste them below and save. The token is kept on the server and never shown again.</li>
+        <li>Back on General Information, set <b>Interactions Endpoint URL</b> to
+          <code id="dc-endpoint"></code> <button type="button" class="chip" id="dc-copy-endpoint">Copy</button> and save there.</li>
+        <li>Add the bot <a id="dc-install-server" target="_blank" rel="noopener">to a server</a> (lets it DM people in that
+          server) and <a id="dc-install-user" target="_blank" rel="noopener">to your account</a> (commands work in any
+          DM; turn on <b>User Install</b> on the Installation page first).</li>
+        <li>Run any command, e.g. <code>/who</code>. The first time, the bot replies with your user ID: paste it below.</li>
+      </ol>
+      <form id="dc-form" class="host-dc-form">
+        <label>Application ID <input id="dc-app" type="text" inputmode="numeric" autocomplete="off" spellcheck="false"></label>
+        <label>Public key <input id="dc-key" type="text" autocomplete="off" spellcheck="false"></label>
+        <label>Bot token <input id="dc-token" type="password" autocomplete="off" spellcheck="false"></label>
+        <label>Your user ID <input id="dc-owner" type="text" inputmode="numeric" autocomplete="off" spellcheck="false"></label>
+        <div class="host-dc-acts">
+          <button class="primary" type="submit">Save</button>
+          <button type="button" class="ghost" id="dc-register">Re-register commands</button>
+          <button type="button" class="ghost danger-text" id="dc-clear">Remove bot</button>
+        </div>
+      </form>
+      <p id="dc-msg" class="small" hidden></p>
+    </details>
   </main>
 
   <script src="/static/host.js"></script>
