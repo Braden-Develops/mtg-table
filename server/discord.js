@@ -341,7 +341,7 @@ async function whoText(config) {
 
 // ---------- live table board ----------
 const VOICE_GRACE_MS = 30 * 60_000;
-const BOARD_ROWS = 5; // tables shown as cards with buttons (Discord allows 40 parts per message)
+const BOARD_ROWS = 4; // tables shown as cards with buttons (Discord allows 40 parts per message)
 
 // Every table with a working link or someone connected: room -> { invited: Map(key -> name), online: Set(key) }
 async function tableState(config) {
@@ -372,8 +372,8 @@ export async function boardMessage(config) {
   const voice = d.voice || {};
   const { live, tables } = await tableState(config);
   const rooms = [...tables.keys()].sort((a, c) => a.localeCompare(c));
-  // 5 cards fit Discord's 40-part limit; with more tables, 4 cards plus a list of the rest.
-  const shown = rooms.length > BOARD_ROWS ? BOARD_ROWS - 1 : BOARD_ROWS;
+  // 4 cards fit Discord's 40-part limit; any more tables are listed under them.
+  const shown = BOARD_ROWS;
   const components = [{
     type: 10,
     content: `## Tables${live ? '' : '\n\u26A0\uFE0F The video server is down right now.'}`,
@@ -383,7 +383,8 @@ export async function boardMessage(config) {
     const people = [...t.invited].sort(([a], [c]) => (t.online.has(c) - t.online.has(a)) || a.localeCompare(c))
       .map(([key, n]) => `${t.online.has(key) ? '\u{1F7E2}' : '\u26AA'} ${n}`);
     const vc = voice[room];
-    const chans = vc?.id && !vc.goneSince ? `\n\u{1F50A} <#${vc.id}>${vc.textId ? `   \u{1F4AC} <#${vc.textId}>` : ''}` : '';
+    const status = [t.online.size ? `\u{1F7E2} ${t.online.size} playing` : 'Nobody playing yet'];
+    if (vc?.textId && !vc.goneSince) status.push(`\u{1F4AC} <#${vc.textId}>`);
     const buttons = [{ type: 2, style: 1, label: 'Play', custom_id: `play:${room}` }];
     if (vc?.id && !vc.goneSince && b.guildId) buttons.push({ type: 2, style: 5, label: 'Voice', url: `https://discord.com/channels/${b.guildId}/${vc.id}` });
     buttons.push({ type: 2, style: 2, label: 'Invite', custom_id: `invite:${room}` });
@@ -394,8 +395,9 @@ export async function boardMessage(config) {
       components: [
         {
           type: 10,
-          content: `### ${room}\n${t.online.size ? `**${t.online.size} playing**` : 'Nobody playing yet'}${chans}\n${people.join('  \u00B7  ') || 'No one invited'}`.slice(0, 1500),
+          content: `### ${room}\n-# ${status.join('  \u00B7  ')}\n${people.join('\u2003') || '-# No one invited yet'}`.slice(0, 1500),
         },
+        { type: 14, divider: true, spacing: 1 },
         { type: 1, components: buttons },
       ],
     });
@@ -568,9 +570,51 @@ function myLinks(config, userId) {
 }
 
 // People picker for inviting to a table (up to 10 at once).
-const invitePicker = (room, text) => reply(text, {
-  components: [{ type: 1, components: [{ type: 5, custom_id: `invpick:${room}`.slice(0, 100), placeholder: `Who should join ${room}?`.slice(0, 150), min_values: 1, max_values: 10 }] }],
-});
+// Lists the server's members (not bots, not you, not people already at this table) when the bot may
+// read the member list ("Server Members Intent" in the Developer Portal) and there are 25 or fewer;
+// otherwise Discord's own people picker (bots picked there are skipped).
+const memberNames = new Map(); // id -> display name, from the last member list
+const cleanName = (...names) => {
+  for (const n of names) {
+    const c = String(n || '').replace(NAME_CHARS, '').replace(/\s+/g, ' ').trim().slice(0, 32);
+    if (c) return c;
+  }
+  return 'Player';
+};
+let warnedIntent = false;
+async function invitePicker(config, i, room, text) {
+  const guildId = i.guild_id || settings(config).board?.guildId;
+  const me = (i.member?.user || i.user || {}).id;
+  if (guildId) {
+    try {
+      const invited = new Set(loadInvites().filter((x) => x.room === room && inviteActive(x) && x.discordId).map((x) => x.discordId));
+      const members = await discordApi(config, 'GET', `/guilds/${guildId}/members?limit=1000`);
+      const people = members.filter((m) => m.user && !m.user.bot && m.user.id !== me && !invited.has(m.user.id))
+        .map((m) => ({ id: m.user.id, name: cleanName(m.nick, m.user.global_name, m.user.username) }))
+        .sort((a, c) => a.name.localeCompare(c.name));
+      for (const m of people) memberNames.set(m.id, m.name);
+      if (!people.length) return reply(`Everyone in this server is already invited to **${room}**.`);
+      if (people.length <= 25) {
+        return reply(text, {
+          components: [{
+            type: 1,
+            components: [{
+              type: 3, custom_id: `invpick:${room}`.slice(0, 100), placeholder: `Who should join ${room}?`.slice(0, 150),
+              min_values: 1, max_values: Math.min(10, people.length),
+              options: people.map((m) => ({ label: m.name, value: m.id })),
+            }],
+          }],
+        });
+      }
+    } catch (err) {
+      if (!warnedIntent) console.warn(`Discord: can't list server members (${err.message}); turn on Server Members Intent to hide bots from the invite list`);
+      warnedIntent = true;
+    }
+  }
+  return reply(text, {
+    components: [{ type: 1, components: [{ type: 5, custom_id: `invpick:${room}`.slice(0, 100), placeholder: `Who should join ${room}?`.slice(0, 150), min_values: 1, max_values: 10 }] }],
+  });
+}
 
 // ---------- interactions ----------
 async function interact(config, i) {
@@ -619,11 +663,13 @@ async function interact(config, i) {
     switch (i.data.name) {
       case 'Invite to MTG table': {
         const friendId = i.data.target_id;
+        if (i.data.resolved?.users?.[friendId]?.bot) return reply("Bots can't play.");
         const name = displayName(i, friendId);
         return tablePicker(friendId, name, DEFAULT_DAYS);
       }
       case 'invite': {
         const friendId = opt('friend');
+        if (i.data.resolved?.users?.[friendId]?.bot) return reply("Bots can't play.");
         const custom = String(opt('name') || '').replace(NAME_CHARS, '').trim().slice(0, 32);
         const name = custom || displayName(i, friendId);
         const days = opt('expires') ?? DEFAULT_DAYS;
@@ -692,7 +738,7 @@ async function interact(config, i) {
       if (room === NEW_TABLE) return newTableForm(friendId, nameParts.join(':'), days);
       return update('', await deliver(config, { friendId, name: nameParts.join(':'), room, days: Number(days), host, hostId: me.id }));
     }
-    if (kind === 'invite') return invitePicker(rest.join(':'), `Who should join **${rest.join(':')}**? They'll get the link by DM.`);
+    if (kind === 'invite') return invitePicker(config, i, rest.join(':'), `Who should join **${rest.join(':')}**? They'll get the link by DM.`);
     if (kind === 'invpick') {
       const room = rest.join(':');
       const ids = (i.data.values || []).filter((id) => !i.data.resolved?.users?.[id]?.bot);
@@ -702,7 +748,11 @@ async function interact(config, i) {
         after: async () => {
           const lines = [];
           for (const friendId of ids) {
-            const name = displayName(i, friendId);
+            let name = i.data.resolved?.users?.[friendId] ? displayName(i, friendId) : memberNames.get(friendId);
+            if (!name) {
+              const m = await discordApi(config, 'GET', `/guilds/${i.guild_id}/members/${friendId}`).catch(() => null);
+              name = cleanName(m?.nick, m?.user?.global_name, m?.user?.username);
+            }
             const r = await deliver(config, { friendId, name, room, days: DEFAULT_DAYS, host, hostId: me.id, withMine: false });
             lines.push(r.content);
           }
@@ -747,11 +797,11 @@ async function interact(config, i) {
     const [kind, friendId, days, ...nameParts] = String(i.data.custom_id).split(':');
     if (kind === 'mktable') {
       const room = String(i.data.components?.[0]?.components?.[0]?.value || '').trim();
-      if (tablesList().includes(room)) return invitePicker(room, `**${room}** already exists. Who should join?`);
+      if (tablesList().includes(room)) return invitePicker(config, i, room, `**${room}** already exists. Who should join?`);
       const mine = linkFor(config, host, room, DEFAULT_DAYS, `Discord (${host})`, me.id);
       if (mine.error) return reply(mine.error);
       boardSoon(config);
-      return invitePicker(room, `Made **${room}**; its chat and voice channels appear in a moment. Your link: ${inviteUrl(config, mine.inv.code)}\nWho should join?`);
+      return invitePicker(config, i, room, `Made **${room}**; its chat and voice channels appear in a moment. Your link: ${inviteUrl(config, mine.inv.code)}\nWho should join?`);
     }
     if (kind === 'newtable') {
       const room = String(i.data.components?.[0]?.components?.[0]?.value || '').trim();
