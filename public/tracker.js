@@ -479,6 +479,18 @@ window.Tracker = (() => {
     const side = Math.round(Math.min(short * 0.6, Math.max(short * 0.22, sideWork * k)));
     const left = Math.round(Math.max(0, Math.min(work.vw - side, x * k - side / 2)));
     const top = Math.round(Math.max(0, Math.min(work.vh - side, y * k - side / 2)));
+    const region = { left: left / k, top: top / k, side: side / k };
+    return runDetector(video, left, top, side).then((cards) => {
+      const all = cards.map((c) => {
+        const quad = c.quad.map(([qx, qy]) => [region.left + qx * region.side, region.top + qy * region.side]);
+        return { ...poseFromQuad(quad), quad, score: c.score };
+      }).filter((p) => p.a > 6);
+      return { region, all, poses: all.filter((p) => p.shape > 0.5) };
+    });
+  }
+
+  // Run the model on a square of the video (video pixels). Quads come back 0-1 over that square.
+  function runDetector(video, left, top, side) {
     if (!detCanvas) {
       detCanvas = document.createElement('canvas');
       detCanvas.width = DET;
@@ -488,18 +500,43 @@ window.Tracker = (() => {
     detCtx.drawImage(video, left, top, side, side, 0, 0, DET, DET);
     const pixels = detCtx.getImageData(0, 0, DET, DET).data;
     const id = ++reqId;
-    const region = { left: left / k, top: top / k, side: side / k };
     worker.postMessage({ t: 'detect', id, pixels }, [pixels.buffer]);
-    return new Promise((resolve) => {
-      pending.set(id, (cards) => {
-        const all = cards.map((c) => {
-          const quad = c.quad.map(([qx, qy]) => [region.left + qx * region.side, region.top + qy * region.side]);
-          return { ...poseFromQuad(quad), quad, score: c.score };
-        }).filter((p) => p.a > 6);
-        resolve({ region, all, poses: all.filter((p) => p.shape > 0.5) });
-      });
-    });
+    return new Promise((resolve) => pending.set(id, resolve));
   }
+
+  // For other tools (reading cards held up to the camera): the cards in a square of my camera's
+  // picture (x, y = its centre, side = its size, all 0-1 of the picture's height). Loads the model
+  // if needed. Resolves with [{ score, shape, quad: 0-1 over the picture }], or null without a model.
+  async function findCards(video, x, y, side) {
+    if (detector === 'off') loadDetector();
+    for (let i = 0; detector === 'loading' && i < 600; i++) await new Promise((r) => setTimeout(r, 100));
+    if (detector !== 'ready' || !video?.videoWidth) return null;
+    while (jobBusy) await new Promise((r) => setTimeout(r, 50));
+    jobBusy = true;
+    try {
+      const vw = video.videoWidth;
+      const vh = video.videoHeight;
+      const px = Math.round(Math.min(vw, vh, side * vh));
+      const left = Math.round(Math.max(0, Math.min(vw - px, x * vw - px / 2)));
+      const top = Math.round(Math.max(0, Math.min(vh - px, y * vh - px / 2)));
+      const cards = await runDetector(video, left, top, px);
+      return cards.map((c) => {
+        const quad = c.quad.map(([qx, qy]) => [left + qx * px, top + qy * px]);
+        const pose = poseFromQuad(quad);
+        return { score: c.score, shape: pose.shape, a: pose.a / vh, b: pose.b / vh, cx: pose.cx / vw, cy: pose.cy / vh, quad: quad.map(([qx, qy]) => [qx / vw, qy / vh]) };
+      });
+    } finally {
+      jobBusy = false;
+    }
+  }
+
+  // Where stickers sit on my camera now (0-1 over the picture), and a card's length on camera.
+  function stickerSpots() {
+    const out = Object.values(state?.stickers || {}).filter((s) => s.tile === me).map((s) => ({ x: s.x, y: s.y }));
+    for (const t of tracks.values()) out.push({ x: t.x, y: t.y });
+    return out;
+  }
+  const cardSize = () => (cardLen && work ? cardLen / work.h : null); // share of the picture's height
 
   // The model outlines a card well only when it's near the middle of what it's shown and about half
   // its height (tested on a dark card on a dark mat in dim light: 0.78 confident at 2x the card's
@@ -900,5 +937,5 @@ window.Tracker = (() => {
     }
   }
 
-  return { init, setRoom, onData, sync, setEnabled, isEnabled: () => enabled, status, debug, probe, noteIdentified };
+  return { init, setRoom, onData, sync, setEnabled, isEnabled: () => enabled, status, debug, probe, noteIdentified, findCards, stickerSpots, cardSize };
 })();

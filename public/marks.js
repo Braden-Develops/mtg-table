@@ -89,6 +89,17 @@ window.Marks = (() => {
       window.Tracker.setEnabled(!window.Tracker.isEnabled());
       showTrack();
     });
+    // Cards I hold up to my camera are read and get a sticker when put down.
+    const showReadHeld = () => {
+      const on = !!window.AutoRead?.isEnabled();
+      $('read-held-btn').classList.toggle('on', on);
+      $('read-held-btn').textContent = on ? 'Read cards I hold up' : 'Held-up cards not read';
+    };
+    showReadHeld();
+    $('read-held-btn').addEventListener('click', () => {
+      window.AutoRead?.setEnabled(!window.AutoRead.isEnabled());
+      showReadHeld();
+    });
     // Drawing color and thickness: per-viewer, remembered on this device.
     const load = (key, fallback) => { try { return localStorage.getItem(key) ?? fallback; } catch { return fallback; } };
     const save = (key, value) => { try { localStorage.setItem(key, value); } catch { /* ignore */ } };

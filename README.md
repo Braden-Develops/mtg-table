@@ -90,6 +90,12 @@ Set your home network to **Private** in Windows settings, and allow both program
   server. Positions go to the others over the call's data channel; resting positions are saved in the
   game state. Per sticker: "Follow the card under it" in the sticker editor. Per player: menu →
   "Stickers follow cards". Without the model files the stickers simply stay put.
+- **Read cards held up:** hold a card up close to your camera and still for a moment; it's recognised
+  (one lookup per card held up, against the decks at the table) and when you put it down on the table
+  it gets a card sticker that follows it. An unsure match asks first; if it can't tell where the card
+  went, the message offers "Place it myself". Runs in your browser (`public/autoread.js`): a tiny
+  greyscale copy of the camera spots something big held still, the corner model checks it's a card.
+  Per player: menu → "Read cards I hold up".
 - **Game modes** (Game panel): Commander (40 life, commander damage), Brawl (25 life head-to-head,
   30 multiplayer, no commander damage), Standard (20 life). Starting life can be overridden.
 - **Decks** panel: paste a deck list (Moxfield/Archidekt/Arena exports work); cards are looked up on
