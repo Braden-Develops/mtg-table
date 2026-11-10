@@ -341,7 +341,7 @@ async function whoText(config) {
 
 // ---------- live table board ----------
 const VOICE_GRACE_MS = 30 * 60_000;
-const BOARD_ROWS = 4; // tables with their own row of buttons (Discord allows 5 rows; 1 is New table / My links)
+const BOARD_ROWS = 5; // tables shown as cards with buttons (Discord allows 40 parts per message)
 
 // Every table with a working link or someone connected: room -> { invited: Map(key -> name), online: Set(key) }
 async function tableState(config) {
@@ -362,35 +362,51 @@ async function tableState(config) {
   return { live, tables };
 }
 
+// Discord's newer message layout: cards (containers) that hold text and buttons together.
+const COMPONENTS_V2 = 1 << 15;
+const BOARD_VERSION = 2;
+
 export async function boardMessage(config) {
   const d = settings(config);
   const b = d.board || {};
   const voice = d.voice || {};
   const { live, tables } = await tableState(config);
   const rooms = [...tables.keys()].sort((a, c) => a.localeCompare(c));
-  const embeds = rooms.slice(0, 9).map((room) => {
+  // 5 cards fit Discord's 40-part limit; with more tables, 4 cards plus a list of the rest.
+  const shown = rooms.length > BOARD_ROWS ? BOARD_ROWS - 1 : BOARD_ROWS;
+  const components = [{
+    type: 10,
+    content: `## Tables${live ? '' : '\n\u26A0\uFE0F The video server is down right now.'}`,
+  }];
+  for (const room of rooms.slice(0, shown)) {
     const t = tables.get(room);
     const people = [...t.invited].sort(([a], [c]) => (t.online.has(c) - t.online.has(a)) || a.localeCompare(c))
       .map(([key, n]) => `${t.online.has(key) ? '\u{1F7E2}' : '\u26AA'} ${n}`);
     const vc = voice[room];
-    const v = vc?.id && !vc.goneSince ? ` \u00B7 <#${vc.id}>${vc.textId ? ` \u00B7 <#${vc.textId}>` : ''}` : '';
-    return {
-      title: room.slice(0, 256),
-      color: t.online.size ? 0x3ba55d : 0x4f545c,
-      description: `${t.online.size ? `**${t.online.size} playing**` : 'Nobody playing yet'}${v}\n${people.join('\n') || 'No one invited'}`.slice(0, 4000),
-    };
-  });
-  if (!rooms.length) embeds.push({ title: 'No tables right now', description: 'Hosts can start one with **New table**.', color: 0x4f545c });
-  if (rooms.length > 9) embeds.push({ description: `+${rooms.length - 9} more tables (see /links)`, color: 0x4f545c });
-
-  const components = rooms.slice(0, BOARD_ROWS).map((room) => {
-    const row = [{ type: 2, style: 1, label: `Play ${room}`.slice(0, 80), custom_id: `play:${room}` }];
-    const v = voice[room];
-    if (v?.id && b.guildId) row.push({ type: 2, style: 5, label: 'Voice', url: `https://discord.com/channels/${b.guildId}/${v.id}` });
-    row.push({ type: 2, style: 2, label: 'Invite', custom_id: `invite:${room}` });
-    row.push({ type: 2, style: 4, label: 'Close', custom_id: `close:${room}` });
-    return { type: 1, components: row };
-  });
+    const chans = vc?.id && !vc.goneSince ? `\n\u{1F50A} <#${vc.id}>${vc.textId ? `   \u{1F4AC} <#${vc.textId}>` : ''}` : '';
+    const buttons = [{ type: 2, style: 1, label: 'Play', custom_id: `play:${room}` }];
+    if (vc?.id && !vc.goneSince && b.guildId) buttons.push({ type: 2, style: 5, label: 'Voice', url: `https://discord.com/channels/${b.guildId}/${vc.id}` });
+    buttons.push({ type: 2, style: 2, label: 'Invite', custom_id: `invite:${room}` });
+    buttons.push({ type: 2, style: 4, label: 'Close', custom_id: `close:${room}` });
+    components.push({
+      type: 17,
+      accent_color: t.online.size ? 0x3ba55d : 0x4f545c,
+      components: [
+        {
+          type: 10,
+          content: `### ${room}\n${t.online.size ? `**${t.online.size} playing**` : 'Nobody playing yet'}${chans}\n${people.join('  \u00B7  ') || 'No one invited'}`.slice(0, 1500),
+        },
+        { type: 1, components: buttons },
+      ],
+    });
+  }
+  if (!rooms.length) {
+    components.push({ type: 17, accent_color: 0x4f545c, components: [{ type: 10, content: 'No tables right now. Hosts can start one with **New table**.' }] });
+  }
+  if (rooms.length > shown) {
+    const more = rooms.slice(shown).map((room) => `**${room}**: ${tables.get(room).online.size} playing`).join('\n');
+    components.push({ type: 17, accent_color: 0x4f545c, components: [{ type: 10, content: `More tables (invite with /invite):\n${more}`.slice(0, 1500) }] });
+  }
   components.push({
     type: 1,
     components: [
@@ -398,12 +414,7 @@ export async function boardMessage(config) {
       { type: 2, style: 2, label: 'My links', custom_id: 'mylink' },
     ],
   });
-  return {
-    content: live ? '' : '\u26A0\uFE0F The video server is down right now.',
-    embeds,
-    components,
-    allowed_mentions: { parse: [] },
-  };
+  return { flags: COMPONENTS_V2, components, allowed_mentions: { parse: [] } };
 }
 
 // Each table gets its own category with a chat and a voice channel; removed when the table ends.
@@ -468,6 +479,16 @@ let boardTimer = null;
 export async function refreshBoard(config, force = false) {
   const b = settings(config).board;
   if (!b || !settings(config).token) return;
+  if (b.version !== BOARD_VERSION || !b.guildId) {
+    try {
+      const ch = await discordApi(config, 'GET', `/channels/${b.channelId}`);
+      await postBoard(config, b.channelId, ch.guild_id, ch.parent_id || null);
+      console.log('Discord: reposted the table board in the new layout');
+    } catch (err) {
+      console.warn(`Discord: could not repost the table board: ${err.message}`);
+    }
+    return;
+  }
   await syncVoice(config);
   const msg = await boardMessage(config);
   const key = JSON.stringify(msg);
@@ -504,7 +525,7 @@ async function postBoard(config, channelId, guildId, categoryId) {
   }
   // Moving the board to another server: forget voice channels that belonged to the old one.
   if (old?.guildId && old.guildId !== guildId) d.voice = {};
-  d.board = { channelId, guildId, categoryId };
+  d.board = { channelId, guildId, categoryId, version: BOARD_VERSION };
   const msg = await discordApi(config, 'POST', `/channels/${channelId}/messages`, await boardMessage(config));
   d.board.messageId = msg.id;
   config.discord = d;
