@@ -36,9 +36,9 @@ const EXPIRY_CHOICES = [
   { name: 'Until revoked', value: 0 },
 ];
 const DEFAULT_DAYS = 1;
-// Manage Channels, View Channel, Send Messages, Embed Links, Read Message History.
-const P = { MANAGE_CHANNELS: 16n, VIEW: 1024n, SEND: 2048n, EMBED: 16384n, HISTORY: 65536n, REACT: 64n, THREADS: 34359738368n + 68719476736n };
-const BOT_PERMISSIONS = String(P.MANAGE_CHANNELS | P.VIEW | P.SEND | P.EMBED | P.HISTORY);
+// Manage Channels, View Channel, Send Messages, Embed Links, Read Message History, Pin Messages.
+const P = { MANAGE_CHANNELS: 16n, VIEW: 1024n, SEND: 2048n, EMBED: 16384n, HISTORY: 65536n, PIN: 1n << 51n, REACT: 64n, THREADS: 34359738368n + 68719476736n };
+const BOT_PERMISSIONS = String(P.MANAGE_CHANNELS | P.VIEW | P.SEND | P.EMBED | P.HISTORY | P.PIN);
 const NEW_TABLE = '__new__';
 const NAME_CHARS = /[^\p{L}\p{N} _.'-]/gu;
 
@@ -440,7 +440,46 @@ async function makeTableChannels(config, room) {
   const cat = await make({ name: `\u{1F3B2} ${room}`.slice(0, 100), type: 4 });
   const text = await make({ name: `${room}-chat`.slice(0, 100), type: 0, parent_id: cat.id, topic: `Chat for table ${room}` });
   const voice = await make({ name: `${room} voice`.slice(0, 100), type: 2, parent_id: cat.id });
-  return { id: voice.id, textId: text.id, categoryId: cat.id };
+  const v = { id: voice.id, textId: text.id, categoryId: cat.id };
+  await postLinkCard(config, room, v);
+  return v;
+}
+
+// The card at the top of each table chat: Play shows each person their own link (only they see it).
+// Discord can't show different text to different people in one message, so the link itself comes
+// from the button; the card is pinned and linked from the channel topic so it's always one tap away.
+async function postLinkCard(config, room, v) {
+  const g = settings(config).board?.guildId;
+  try {
+    const msg = await discordApi(config, 'POST', `/channels/${v.textId}/messages`, {
+      flags: COMPONENTS_V2,
+      allowed_mentions: { parse: [] },
+      components: [{
+        type: 17,
+        accent_color: 0x5865f2,
+        components: [
+          { type: 10, content: `### \u{1F3B2} ${room}\nTap **Play** to get your own link to this table. Only you see it.` },
+          { type: 1, components: [
+            { type: 2, style: 1, label: 'Play', custom_id: `play:${room}`.slice(0, 100) },
+            ...(g ? [{ type: 2, style: 5, label: 'Voice', url: `https://discord.com/channels/${g}/${v.id}` }] : []),
+            { type: 2, style: 2, label: 'My links', custom_id: 'mylink' },
+          ] },
+        ],
+      }],
+    });
+    v.pinId = msg.id;
+    if (g) {
+      await discordApi(config, 'PATCH', `/channels/${v.textId}`, {
+        topic: `Your link to ${room}: tap Play here → https://discord.com/channels/${g}/${v.textId}/${msg.id}`.slice(0, 1024),
+      }).catch(() => {});
+    }
+    await discordApi(config, 'PUT', `/channels/${v.textId}/messages/pins/${msg.id}`).catch((err) => {
+      if (err.code === 50013) console.warn(`Discord: no permission to pin in ${room}-chat (give the bot Pin Messages); the card and topic link still work`);
+    });
+  } catch (err) {
+    v.pinId = 'failed'; // don't retry every refresh
+    console.warn(`Discord: could not post the link card for ${room}: ${err.message}`);
+  }
 }
 
 async function syncVoice(config) {
@@ -454,6 +493,7 @@ async function syncVoice(config) {
     const v = d.voice[room];
     if (v) {
       if (v.goneSince) { delete v.goneSince; changed = true; }
+      if (v.textId && !v.pinId) { await postLinkCard(config, room, v); changed = true; } // tables made before link cards
       continue;
     }
     try {
