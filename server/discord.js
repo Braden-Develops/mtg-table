@@ -26,7 +26,8 @@ const EXPIRY_CHOICES = [
   { name: '30 days', value: 30 },
   { name: 'Until revoked', value: 0 },
 ];
-const DEFAULT_DAYS = 7;
+const DEFAULT_DAYS = 1;
+const NEW_TABLE = '__new__';
 const NAME_CHARS = /[^\p{L}\p{N} _.'-]/gu;
 
 // ---------- commands Discord shows ----------
@@ -39,7 +40,7 @@ export const COMMANDS = [
     options: [
       { type: 6, name: 'friend', description: 'Who to invite', required: true },
       { type: 3, name: 'table', description: 'Table name (leave empty to pick from a list)', autocomplete: true, max_length: 32 },
-      { type: 4, name: 'expires', description: 'How long the link works (default 1 week)', choices: EXPIRY_CHOICES },
+      { type: 4, name: 'expires', description: 'How long the link works (default 1 day)', choices: EXPIRY_CHOICES },
       { type: 3, name: 'name', description: 'Name shown at the table (default: their Discord name)', max_length: 32 },
     ],
   },
@@ -181,48 +182,85 @@ function displayName(i, userId) {
   return 'Player';
 }
 
-function tablesList(config) {
-  const rooms = new Set([config.defaultRoom || 'table']);
+// Tables that exist right now: any with a working link.
+function tablesList() {
+  const rooms = new Set();
   for (const inv of loadInvites()) if (inviteActive(inv)) rooms.add(inv.room);
   return [...rooms].sort();
 }
 
-function tablePicker(config, friendId, name, days, text) {
-  return reply(text, {
+const lasts = (days) => (Number(days) > 0 ? `${days} day${Number(days) === 1 ? '' : 's'}` : 'until you revoke it');
+
+// Popup asking for a new table's name.
+function newTableForm(friendId, name, days) {
+  return {
+    type: 9,
+    data: {
+      custom_id: `newtable:${friendId}:${days}:${name}`.slice(0, 100),
+      title: `New table for ${name}`.slice(0, 45),
+      components: [{
+        type: 1,
+        components: [{
+          type: 4, custom_id: 'room', style: 1, label: 'Table name', placeholder: 'e.g. friday',
+          min_length: 1, max_length: 32, required: true,
+        }],
+      }],
+    },
+  };
+}
+
+// Pick an existing table or make a new one; with no tables yet it goes straight to naming one.
+function tablePicker(friendId, name, days) {
+  const tables = tablesList();
+  if (!tables.length) return newTableForm(friendId, name, days);
+  return reply(`Which table should **${name}** join? (link works ${Number(days) > 0 ? 'for ' : ''}${lasts(days)})`, {
     components: [{
       type: 1,
       components: [{
         type: 3,
         custom_id: `pick:${friendId}:${days}:${name}`.slice(0, 100),
         placeholder: 'Pick a table',
-        options: tablesList(config).slice(0, 25).map((r) => ({ label: r, value: r })),
+        options: [
+          ...tables.slice(0, 24).map((r) => ({ label: r, value: r })),
+          { label: 'New table...', value: NEW_TABLE, description: 'Name a new table' },
+        ],
       }],
     }],
   });
 }
 
+// A working link at this table for `name`, made if there isn't one. Returns { inv, reused } or { error }.
+function linkFor(config, name, room, days) {
+  const inv = loadInvites().find((x) => x.room === room && x.name.toLowerCase() === name.toLowerCase() && inviteActive(x));
+  if (inv) return { inv, reused: true };
+  const made = makeInvite(config, { name, room, days, by: 'Discord' });
+  return made.error ? { error: made.error } : { inv: made.inv, reused: false };
+}
+
 // Makes (or reuses) the link and DMs it. Falls back to showing the link with a "Post here" button
 // when Discord won't let the bot DM them (they share no server with the bot, or block DMs).
 async function deliver(config, { friendId, name, room, days, host }) {
-  let inv = loadInvites().find((x) => x.room === room && x.name.toLowerCase() === name.toLowerCase() && inviteActive(x));
-  const reused = !!inv;
-  if (!inv) {
-    const made = makeInvite(config, { name, room, days, by: 'Discord' });
-    if (made.error) return { content: made.error };
-    inv = made.inv;
-  }
+  const friend = linkFor(config, name, room, days);
+  if (friend.error) return { content: friend.error };
+  const { inv, reused } = friend;
   const url = inviteUrl(config, inv.code);
+  // The host gets a link to the same table too (reused if they already have one there).
+  let mine = '';
+  if (host.toLowerCase() !== name.toLowerCase()) {
+    const me = linkFor(config, host, room, days);
+    mine = me.inv ? `\nYour link: ${inviteUrl(config, me.inv.code)}` : `\n(Couldn't make your own link: ${me.error})`;
+  }
   const text = `${host} invited you to play Magic at table **${room}**: ${url}\nOpen it in Chrome, Edge or Safari; the link ${until(inv)}.`;
   try {
     const ch = await discordApi(config, 'POST', '/users/@me/channels', { recipient_id: friendId });
     await discordApi(config, 'POST', `/channels/${ch.id}/messages`, { content: text, allowed_mentions: { parse: [] } });
     console.log(`Discord: sent ${name} a link to table ${room}`);
-    return { content: `Sent <@${friendId}> ${reused ? 'their existing' : 'a new'} link to table **${room}** (${until(inv)}).` };
+    return { content: `Sent <@${friendId}> ${reused ? 'their existing' : 'a new'} link to table **${room}** (${until(inv)}).${mine}` };
   } catch (err) {
     console.warn(`Discord: could not DM ${name}: ${err.message}`);
     return {
       content: `Couldn't DM <@${friendId}> (${err.code === 50007 ? 'they need to share a server with the bot, or they block DMs' : err.message}). `
-        + `Here is ${reused ? 'their existing' : 'a new'} link for table **${room}** (${until(inv)}):\n${url}`,
+        + `Here is ${reused ? 'their existing' : 'a new'} link for table **${room}** (${until(inv)}):\n${url}${mine}`,
       components: [{ type: 1, components: [{ type: 2, style: 1, label: 'Post it in this chat', custom_id: `post:${inv.code}` }] }],
     };
   }
@@ -268,7 +306,7 @@ async function interact(config, i) {
     const q = String(focused?.value || '').toLowerCase();
     let choices = [];
     if (focused?.name === 'table') {
-      choices = tablesList(config).filter((r) => r.toLowerCase().includes(q)).map((r) => ({ name: r, value: r }));
+      choices = tablesList().filter((r) => r.toLowerCase().includes(q)).map((r) => ({ name: r, value: r }));
       if (q && /^[\w-]{1,32}$/.test(q) && !choices.some((c) => c.value.toLowerCase() === q)) choices.unshift({ name: `${focused.value} (new table)`, value: focused.value });
     } else if (focused?.name === 'link') {
       choices = loadInvites().filter((inv) => inviteActive(inv) && `${inv.name} ${inv.room}`.toLowerCase().includes(q))
@@ -283,7 +321,7 @@ async function interact(config, i) {
       case 'Invite to MTG table': {
         const friendId = i.data.target_id;
         const name = displayName(i, friendId);
-        return tablePicker(config, friendId, name, DEFAULT_DAYS, `Which table should **${name}** join? (link works for 1 week)`);
+        return tablePicker(friendId, name, DEFAULT_DAYS);
       }
       case 'invite': {
         const friendId = opt('friend');
@@ -291,7 +329,7 @@ async function interact(config, i) {
         const name = custom || displayName(i, friendId);
         const days = opt('expires') ?? DEFAULT_DAYS;
         const room = String(opt('table') || '').trim();
-        if (!room) return tablePicker(config, friendId, name, days, `Which table should **${name}** join?`);
+        if (!room) return tablePicker(friendId, name, days);
         return reply('', await deliver(config, { friendId, name, room, days, host }));
       }
       case 'links':
@@ -312,12 +350,23 @@ async function interact(config, i) {
     if (kind === 'pick') {
       const [friendId, days, ...nameParts] = rest;
       const room = i.data.values?.[0];
+      if (room === NEW_TABLE) return newTableForm(friendId, nameParts.join(':'), days);
       return update('', await deliver(config, { friendId, name: nameParts.join(':'), room, days: Number(days), host }));
     }
     if (kind === 'post') {
       const inv = loadInvites().find((x) => x.code === rest[0] && inviteActive(x));
       if (!inv) return reply('That link no longer works.');
       return { type: 4, data: { content: `${inv.name}, here's your link to table **${inv.room}**: ${inviteUrl(config, inv.code)} (${until(inv)})`, allowed_mentions: { parse: [] } } };
+    }
+  }
+  // The new-table popup was filled in.
+  if (i.type === 5) {
+    const [kind, friendId, days, ...nameParts] = String(i.data.custom_id).split(':');
+    if (kind === 'newtable') {
+      const room = String(i.data.components?.[0]?.components?.[0]?.value || '').trim();
+      const result = await deliver(config, { friendId, name: nameParts.join(':'), room, days: Number(days), host });
+      // Opened from the picker: replace the picker message. Opened from a command: a new reply.
+      return i.message ? update('', result) : reply('', result);
     }
   }
   return reply("Sorry, I didn't understand that.");

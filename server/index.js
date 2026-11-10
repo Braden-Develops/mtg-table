@@ -469,6 +469,10 @@ async function hostDiscord(req, res, p, body) {
 }
 
 // ---------- start ----------
+// Keep Discord's copy of the bot's commands current (they change with deploys).
+if (config.discord?.appId && config.discord?.token) {
+  registerCommands(config).then((r) => console.log(r.error ? `Discord: ${r.error}` : 'Discord commands registered'));
+}
 startMetrics(config);
 const onRequest = (req, res) => handle(req, res).catch((err) => {
   console.error(err);
