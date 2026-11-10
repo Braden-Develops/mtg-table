@@ -319,6 +319,14 @@ export function applyAction(room, by, action) {
       s.y = unit(action.y);
       break; // moves aren't logged
     }
+    case 'stickerFixed': {
+      // Fixed stickers stay where they were put; others follow the card under them.
+      const s = game.stickers[action.id];
+      if (!s) return 'Sticker is gone';
+      if (action.fixed) s.fixed = true;
+      else delete s.fixed;
+      break; // not logged
+    }
     case 'stickerScale': {
       // Per-sticker size, shared so it covers the same part of the card for everyone.
       const s = game.stickers[action.id];

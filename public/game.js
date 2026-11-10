@@ -21,6 +21,7 @@ window.Game = (() => {
     me = myName;
     window.Marks.init({ code, me, act });
     window.Identify.init({ code, me });
+    window.Tracker.init({ code, me, act });
     window.Decks.init({ code, me, act });
     connect();
     wirePanel();

@@ -78,6 +78,17 @@ window.Marks = (() => {
     try { savedNames = localStorage.getItem('showNames') ?? '1'; } catch { /* ignore */ }
     setNames(savedNames !== '0');
     $('names-btn').addEventListener('click', () => setNames(document.body.classList.contains('hide-names')));
+    // Stickers on my camera follow the cards under them (tracked on this computer).
+    const showTrack = () => {
+      const on = window.Tracker.isEnabled();
+      $('track-btn').classList.toggle('on', on);
+      $('track-btn').textContent = on ? 'Stickers follow cards' : 'Stickers stay put';
+    };
+    showTrack();
+    $('track-btn').addEventListener('click', () => {
+      window.Tracker.setEnabled(!window.Tracker.isEnabled());
+      showTrack();
+    });
     // Drawing color and thickness: per-viewer, remembered on this device.
     const load = (key, fallback) => { try { return localStorage.getItem(key) ?? fallback; } catch { return fallback; } };
     const save = (key, value) => { try { localStorage.setItem(key, value); } catch { /* ignore */ } };
@@ -121,6 +132,7 @@ window.Marks = (() => {
     });
     wireEditor();
     setInterval(tickFades, 400);
+    setInterval(expireLive, 1000);
     window.addEventListener('resize', () => tiles.forEach((_, tile) => layout(tile)));
   }
 
@@ -384,10 +396,7 @@ window.Marks = (() => {
         wireSticker(el);
         e.stickers.appendChild(el);
       }
-      if (!el.classList.contains('dragging')) {
-        el.style.left = `${s.x * 100}%`;
-        el.style.top = `${s.y * 100}%`;
-      }
+      positionSticker(el, s);
       if (!el.classList.contains('resizing')) el.style.setProperty('--sticker-own', String(s.scale || 1));
       const html = stickerHtml(s);
       if (el._html !== html) {
@@ -395,7 +404,58 @@ window.Marks = (() => {
         el._html = html;
       }
     }
-    for (const el of existing.values()) el.remove();
+    for (const el of existing.values()) {
+      live.delete(el.dataset.id);
+      el.remove();
+    }
+  }
+
+  // ---------- stickers that follow cards ----------
+  // The camera's owner tracks the card under each sticker and sends positions as it moves
+  // (window.Tracker); the game state gets the resting position. Live positions win while fresh.
+  const LIVE_TTL = 5000;
+  const live = new Map(); // sticker id -> { x, y, flags (1 following a card, 2 card lost), at }
+
+  function positionSticker(el, s) {
+    const l = live.get(el.dataset.id);
+    const fresh = l && Date.now() - l.at < LIVE_TTL;
+    if (!el.classList.contains('dragging') && (fresh || s)) {
+      el.style.left = `${(fresh ? l.x : s.x) * 100}%`;
+      el.style.top = `${(fresh ? l.y : s.y) * 100}%`;
+    }
+    el.classList.toggle('anchored', !!(fresh && l.flags & 1));
+    el.classList.toggle('lost', !!(fresh && l.flags & 2));
+  }
+
+  // local: from my own tracker (never goes stale). x === null forgets the live position.
+  function setLive(id, x, y, flags = 0, local = false) {
+    if (x === null || x === undefined) live.delete(id);
+    else live.set(id, { x, y, flags, at: local ? Infinity : Date.now() });
+    const el = document.querySelector(`.sticker[data-id="${CSS.escape(id)}"]`);
+    if (el) positionSticker(el, state?.stickers?.[id]);
+  }
+
+  function expireLive() {
+    const now = Date.now();
+    for (const [id, l] of live) {
+      if (now - l.at < LIVE_TTL) continue;
+      live.delete(id);
+      const el = document.querySelector(`.sticker[data-id="${CSS.escape(id)}"]`);
+      if (el) positionSticker(el, state?.stickers?.[id]);
+    }
+  }
+
+  function followStatus(s) {
+    if (s.fixed) return '';
+    const mine = s.tile === me ? window.Tracker.status(s.id) : null;
+    const l = live.get(s.id);
+    const flags = l && Date.now() - l.at < LIVE_TTL ? l.flags : 0;
+    if (mine === 'looking') return 'Looking for the card…';
+    if (mine === 'no-card') return 'No card found under it, so it stays put.';
+    if (flags & 2 || mine === 'lost') return 'Card not in view: the sticker goes away soon unless it comes back.';
+    if (flags & 1) return 'Following the card.';
+    if (s.tile === me && !window.Tracker.isEnabled()) return 'Card tracking is off on your computer (menu: Stickers follow cards).';
+    return '';
   }
 
   function wireSticker(el) {
@@ -538,6 +598,8 @@ window.Marks = (() => {
     const pct = Math.round((s?.scale || 1) * 100);
     body.innerHTML = `
       ${total ? `<div class="ed-total">Shows as <b>${esc(total)}</b></div>` : ''}
+      ${s ? `<label class="ed-follow"><input type="checkbox" data-ed="follow" ${s.fixed ? '' : 'checked'}> Follow the card under it
+        <span class="muted small">${esc(followStatus(s))}</span></label>` : ''}
       ${s ? `<label class="ed-size">Size <input type="range" data-ed="scale" min="40" max="300" step="10" value="${pct}"> <output>${pct}%</output></label>` : ''}
       <ol class="ed-items">${items.map((it, i) => itemEditorHtml(it, i)).join('')}</ol>
       ${items.length ? '' : '<p class="muted">Pick what to put on the table. You can stack more things on it afterwards (equipment, auras, counters).</p>'}
@@ -699,6 +761,11 @@ window.Marks = (() => {
         t.blur();
         return;
       }
+      if (t.dataset.ed === 'follow') {
+        const s = currentSticker();
+        if (s) act({ type: 'stickerFixed', id: s.id, fixed: !t.checked });
+        return;
+      }
       if (t.dataset.ed !== 'field') return;
       updateItem(Number(t.dataset.i), { [t.dataset.field]: t.value });
     });
@@ -781,6 +848,7 @@ window.Marks = (() => {
       drawCanvas(tile);
       renderStickers(tile);
     }
+    window.Tracker?.sync(next);
     // Refresh the editor unless the user is typing in it.
     const active = document.activeElement;
     const typing = active && $('sticker-dialog').contains(active) && active.matches('input, select');
@@ -832,5 +900,5 @@ window.Marks = (() => {
     openEditor({ mode: 'lookup' });
   }
 
-  return { init, attachTile, detachTile, update, showCard, showPreview, hidePreview, tileAt, dropCard, placeCard, openLookup };
+  return { init, attachTile, detachTile, update, showCard, showPreview, hidePreview, tileAt, dropCard, placeCard, openLookup, setLive };
 })();

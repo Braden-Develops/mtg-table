@@ -114,6 +114,7 @@
       });
       wireRoomEvents();
       window.Identify.setRoom(room);
+      window.Tracker.setRoom(room);
       await room.connect(auth.serverUrl, auth.token);
 
       if (!previewVideo) await startPreview($('camera-select').value);
@@ -158,7 +159,10 @@
       .on(RoomEvent.TrackMuted, renderAll)
       .on(RoomEvent.TrackUnmuted, renderAll)
       .on(RoomEvent.LocalTrackPublished, renderAll)
-      .on(RoomEvent.DataReceived, (payload, participant, kind, topic) => window.Identify.onData(payload, participant, topic))
+      .on(RoomEvent.DataReceived, (payload, participant, kind, topic) => {
+        window.Identify.onData(payload, participant, topic);
+        window.Tracker.onData(payload, participant, topic);
+      })
       .on(RoomEvent.ActiveSpeakersChanged, (speakers) => {
         const ids = new Set(speakers.map((s) => s.identity));
         for (const [id, tile] of tiles) tile.classList.toggle('speaking', ids.has(id));

@@ -44,6 +44,10 @@ import {
 const config = loadConfig();
 const PUBLIC_DIR = path.join(ROOT, 'public');
 const LIVEKIT_CLIENT = path.join(ROOT, 'node_modules', 'livekit-client', 'dist', 'livekit-client.umd.js');
+// Card tracking runs in each player's own browser (onnxruntime-web + the corner model), not here.
+const ORT_DIR = path.join(ROOT, 'node_modules', 'onnxruntime-web', 'dist');
+const ORT_FILES = /^(ort\.wasm\.min\.mjs|ort-wasm-simd-threaded\.(mjs|wasm))$/;
+const POSE_FILES = { 'pose.onnx': 'mtg_4kp_s_r4b.onnx', 'mtg_4kp_s_r4b.onnx.data': 'mtg_4kp_s_r4b.onnx.data' };
 const TOKEN_TTL = '8h';
 const STATS_LOG = path.join(ROOT, 'data', 'stats.jsonl');
 
@@ -55,6 +59,8 @@ const MIME = {
   '.svg': 'image/svg+xml',
   '.png': 'image/png',
   '.ico': 'image/x-icon',
+  '.mjs': 'text/javascript; charset=utf-8',
+  '.wasm': 'application/wasm',
 };
 
 // ---------- LiveKit child process ----------
@@ -101,15 +107,29 @@ function send(res, status, body, type = 'application/json') {
   res.end(payload);
 }
 
-function sendFile(res, file) {
+function sendFile(res, file, cache = 'no-cache') {
   fs.readFile(file, (err, data) => {
     if (err) return send(res, 404, 'Not found', 'text/plain');
     res.writeHead(200, {
       ...SECURITY_HEADERS,
       'Content-Type': MIME[path.extname(file)] || 'application/octet-stream',
-      'Cache-Control': 'no-cache',
+      'Cache-Control': cache,
     });
     res.end(data);
+  });
+}
+
+// Big files that never change (versioned by name): streamed, and cached by the browser.
+function sendBig(res, file, cache) {
+  fs.stat(file, (err, st) => {
+    if (err || !st.isFile()) return send(res, 404, 'Not found', 'text/plain');
+    res.writeHead(200, {
+      ...SECURITY_HEADERS,
+      'Content-Type': MIME[path.extname(file)] || 'application/octet-stream',
+      'Content-Length': st.size,
+      'Cache-Control': cache,
+    });
+    fs.createReadStream(file).pipe(res);
   });
 }
 
@@ -230,6 +250,16 @@ async function handle(req, res) {
   }
   if (req.method === 'GET' && p === '/vendor/livekit-client.umd.js.map') {
     return sendFile(res, LIVEKIT_CLIENT + '.map');
+  }
+  const ortMatch = p.match(/^\/vendor\/ort\/([\w.-]+)$/);
+  if (req.method === 'GET' && ortMatch && ORT_FILES.test(ortMatch[1])) {
+    return sendBig(res, path.join(ORT_DIR, ortMatch[1]), 'public, max-age=86400');
+  }
+  // The card corner model, for tracking cards under stickers in the camera owner's browser.
+  const modelMatch = p.match(/^\/api\/models\/([\w.-]+)$/);
+  if (req.method === 'GET' && modelMatch && POSE_FILES[modelMatch[1]]) {
+    if (!guest(url.searchParams.get('code'), 'model', 20)) return;
+    return sendBig(res, path.join(ROOT, 'models', POSE_FILES[modelMatch[1]]), 'private, max-age=604800, immutable');
   }
   if (req.method === 'GET' && p.startsWith('/static/')) {
     const file = path.normalize(path.join(PUBLIC_DIR, p.slice('/static/'.length)));

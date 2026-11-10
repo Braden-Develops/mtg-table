@@ -83,6 +83,13 @@ Set your home network to **Private** in Windows settings, and allow both program
 - **Tools bar:** *Sticker* (click a video to place P/T, modifiers, counters, text or a Scryfall card;
   click a sticker to edit or stack more on it; drag to move), *Pen* and *Arrow* (fade after 20 s unless
   "Drawings stay" is on), *Find card* (search Scryfall, then place the card as a sticker).
+- **Stickers follow cards:** a sticker placed on a card follows it when it's slid or tapped, and fades
+  then goes away (with Undo) when the card leaves the table. The tracking runs in the browser of the
+  player whose camera it is (`public/tracker.js`: the corner model through onnxruntime-web in a
+  worker to find the card, then cheap template matching every frame), so it adds no load on the
+  server. Positions go to the others over the call's data channel; resting positions are saved in the
+  game state. Per sticker: "Follow the card under it" in the sticker editor. Per player: menu →
+  "Stickers follow cards". Without the model files the stickers simply stay put.
 - **Game modes** (Game panel): Commander (40 life, commander damage), Brawl (25 life head-to-head,
   30 multiplayer, no commander damage), Standard (20 life). Starting life can be overridden.
 - **Decks** panel: paste a deck list (Moxfield/Archidekt/Arena exports work); cards are looked up on

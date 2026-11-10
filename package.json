@@ -15,6 +15,7 @@
     "livekit-client": "^2.23.0",
     "livekit-server-sdk": "^2.19.2",
     "onnxruntime-node": "^1.31.1",
+    "onnxruntime-web": "1.31",
     "selfsigned": "^5.5.0",
     "sharp": "^0.35.5"
   },
