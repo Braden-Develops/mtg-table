@@ -23,8 +23,10 @@ window.Tracker = (() => {
   const JUMP = 0.75; // match needed to follow a big move (sliding fast, tapping)
   const RECOVER_NEAR = 0.3; // a card the model finds right where ours was (tapped): low bar
   const RECOVER_FAR = 0.55;
-  const FADE_AFTER = 1500; // lost this long: stickers fade for everyone
-  const REMOVE_AFTER = 6000; // lost this long (and the model can't find it nearby): removed
+  const FADE_AFTER = 2500; // lost this long: stickers fade for everyone
+  const REMOVE_AFTER = 8000; // lost this long (and neither the model nor whole-picture scans find it): removed
+  const GLIDE_MS = 400; // a card lost while sliding: assume it kept going this long
+  const SCAN_MS = 700; // whole-picture search for a lost card: at most this often
   const SETTLE_MS = 700; // a moved card resting this long gets its outline straightened
   const PERSIST_MS = 1000; // ...and its sticker position saved in the game state
   const SEND_MS = 125; // live position updates to other players: at most 8 a second
@@ -125,9 +127,8 @@ window.Tracker = (() => {
         row += 0.299 * d[j] + 0.587 * d[j + 1] + 0.114 * d[j + 2];
         S[(y + 1) * W1 + x + 1] = S[y * W1 + x + 1] + row;
       }
-      check += d[(y * w + (y % w)) * 4] * (y + 1);
+      check += row * (y + 1); // any change anywhere in the picture changes this
     }
-    for (let i = 0; i < w * h; i += 97) check += d[i * 4 + 1] * (i & 255);
     // The same picture as last time: the camera is paused or off (real cameras always have noise).
     if (check === lastSum) return false;
     lastSum = check;
@@ -274,7 +275,7 @@ window.Tracker = (() => {
   // ---------- tracks ----------
   // phase: acquire (waiting for the model) | track | none (no card under it)
   function restart(t, x, y) {
-    Object.assign(t, { phase: 'acquire', x, y, lostMs: 0, weakMs: 0, skip: 0, tries: 0, retryAt: 0, pose: null, vx: 0, vy: 0, moved: false, recoverTries: 0, sentKey: '' });
+    Object.assign(t, { phase: 'acquire', x, y, lostMs: 0, weakMs: 0, skip: 0, tries: 0, retryAt: 0, pose: null, vx: 0, vy: 0, moved: false, recoverTries: 0, scans: 0, scanAt: 0, sentKey: '' });
   }
 
   function placeFromPose(t) {
@@ -313,10 +314,18 @@ window.Tracker = (() => {
     t.lostMs = 0;
     t.weakMs = 0;
     t.recoverTries = 0;
+    t.via = 'model';
     placeFromPose(t);
   }
 
   let cardLen = null; // typical card length on camera, in working pixels
+
+  // Where a card that was sliding when we lost it has probably come to rest: carry on along its last
+  // velocity for a moment (cards slide for a fraction of a second, then stop).
+  function restingGuess(t) {
+    const glide = Math.min(t.lostMs + 60, GLIDE_MS);
+    return { cx: t.pose.cx + t.vx * glide, cy: t.pose.cy + t.vy * glide };
+  }
 
   function step(t, dt, now) {
     const p = t.pose;
@@ -328,18 +337,23 @@ window.Tracker = (() => {
     } else {
       best = search(t, p.cx, p.cy, p.th, 3, 1);
       // Moving, tapped, covered or gone: look further. When it's been missing a while, only every third frame.
-      if (best.score < STAY && (t.lostMs + t.weakMs < 1000 || t.skip++ % 3 === 0)) {
+      if (best.score < STAY && (t.lostMs + t.weakMs < 1500 || t.skip++ % 3 === 0)) {
         const L = t.b;
+        // Where it should be now if it kept its speed; the faster it goes, the wider we look.
+        const lead = t.lostMs ? restingGuess(t) : { cx: p.cx + t.vx * dt, cy: p.cy + t.vy * dt };
+        const travel = Math.hypot(lead.cx - p.cx, lead.cy - p.cy);
+        const radius = Math.round(Math.min(L * 2.5, Math.max(4, L * 0.45, travel * 0.6)));
         const tries = [
-          search(t, p.cx + t.vx, p.cy + t.vy, p.th, Math.max(4, Math.round(L * 0.45)), 2),
+          search(t, lead.cx, lead.cy, p.th, radius, radius > L ? 3 : 2),
           search(t, p.cx, p.cy, p.th + Math.PI / 2, Math.round(L * 0.5), 2),
           search(t, p.cx, p.cy, p.th - Math.PI / 2, Math.round(L * 0.5), 2),
         ];
         // A jump must be convincing: half-matches on a half-turned card or the table drag the sticker off.
         for (const r of tries) if (r.score >= JUMP && r.score > best.score) best = r;
         if (best.score < JUMP) {
-          // Fast slide: look wider, and be stricter still.
-          const wide = search(t, p.cx + t.vx, p.cy + t.vy, p.th, Math.round(L * 1.1), 3);
+          // Look wider still around where it was and where it was heading, and be stricter.
+          const mid = { cx: (p.cx + lead.cx) / 2, cy: (p.cy + lead.cy) / 2 };
+          const wide = search(t, mid.cx, mid.cy, p.th, Math.round(Math.min(L * 3, L * 1.1 + travel / 2)), 3);
           if (wide.score >= JUMP + 0.07 && wide.score > best.score) best = wide;
         }
       }
@@ -347,25 +361,70 @@ window.Tracker = (() => {
     t.score = best.score;
     t.weakMs = best.score < SURE ? t.weakMs + dt : 0;
     // Weak for long and the model couldn't fix it: treat as lost (it may have left the table).
-    if (best.score >= OK && t.weakMs < 2500) {
-      const dx = best.cx - p.cx;
-      const dy = best.cy - p.cy;
-      t.vx = 0.6 * dx + 0.4 * t.vx;
-      t.vy = 0.6 * dy + 0.4 * t.vy;
-      if (Math.hypot(dx, dy) > 0.6 || Math.abs(angDiff(best.th, p.th)) > 0.04) {
-        t.moved = true;
-        t.lastMove = now;
-      }
-      t.pose = { cx: best.cx, cy: best.cy, th: best.th };
-      if (best.score >= STAY) t.good = { ...t.pose };
-      t.lostMs = 0;
-      t.recoverTries = 0;
-      placeFromPose(t);
-    } else {
+    if (best.score >= OK && t.weakMs < 2500) found(t, best, dt, now);
+    else {
       t.lostMs += dt;
-      t.vx *= 0.5;
-      t.vy *= 0.5;
+      if (t.lostMs > GLIDE_MS) { t.vx *= 0.7; t.vy *= 0.7; }
     }
+  }
+
+  // Follow the card to a new pose. Velocity is in working pixels per millisecond.
+  function found(t, best, dt, now) {
+    const p = t.pose;
+    const dx = best.cx - p.cx;
+    const dy = best.cy - p.cy;
+    const span = Math.max(dt, 1) + (t.lostMs || 0);
+    // Found again after a gap: it has probably slowed down, so trust that speed less.
+    const keep = t.lostMs ? 0.3 : 0.6;
+    t.vx = keep * (dx / span) + (1 - keep) * t.vx * (t.lostMs ? 0 : 1);
+    t.vy = keep * (dy / span) + (1 - keep) * t.vy * (t.lostMs ? 0 : 1);
+    if (Math.hypot(dx, dy) > 0.6 || Math.abs(angDiff(best.th, p.th)) > 0.04) {
+      t.moved = true;
+      t.lastMove = now;
+    }
+    t.pose = { cx: best.cx, cy: best.cy, th: best.th };
+    if (best.score >= STAY) t.good = { ...t.pose };
+    t.lostMs = 0;
+    t.recoverTries = 0;
+    t.scans = 0;
+    placeFromPose(t);
+  }
+
+  // Last resort for a card that's been lost a moment (thrown across the mat faster than we could
+  // follow): look for it over the whole picture. Costs a few tens of ms, so one track at a time,
+  // and at most every SCAN_MS per track. Takes the best clear match, preferring the one nearest to
+  // where it was heading if two are about as good (two copies of a basic land).
+  function scanAll(t, now) {
+    t.scanAt = now + SCAN_MS;
+    const turns = [0, Math.PI / 2, -Math.PI / 2];
+    const th = t.pose.th + turns[t.scans % 3];
+    t.scans++;
+    const { w, h } = work;
+    const m = Math.ceil(t.a * 0.3);
+    const peaks = []; // a few best spots, kept apart from each other
+    for (let y = m; y < h - m; y += 3) {
+      for (let x = m; x < w - m; x += 3) {
+        const score = ncc(t, x, y, th, true);
+        if (score < JUMP) continue;
+        const near = peaks.findIndex((q) => Math.hypot(q.cx - x, q.cy - y) < t.a * 0.5);
+        if (near >= 0) {
+          if (score > peaks[near].score) peaks[near] = { score, cx: x, cy: y, th };
+          continue;
+        }
+        peaks.push({ score, cx: x, cy: y, th });
+        if (peaks.length > 6) peaks.sort((a, b) => b.score - a.score).pop();
+      }
+    }
+    const guess = restingGuess(t);
+    let best = null;
+    for (const q of peaks) {
+      const r = polish(t, search(t, q.cx, q.cy, th, 2, 1));
+      if (r.score < JUMP + 0.07) continue;
+      r.dist = Math.hypot(r.cx - guess.cx, r.cy - guess.cy);
+      if (!best || r.score > best.score + 0.03 || (Math.abs(r.score - best.score) <= 0.03 && r.dist < best.dist)) best = r;
+    }
+    if (best) { found(t, best, 0, now); t.via = 'scan'; }
+    return !!best;
   }
 
   // ---------- the corner model (worker) ----------
@@ -525,12 +584,15 @@ window.Tracker = (() => {
     if (!doubt) t.recoverTries++;
     t.retryAt = now + 700;
     // Where it was last seen for sure (a doubtful track may have drifted onto something else).
-    const at = doubt || t.weakMs > 0 ? { ...t.good } : { cx: t.pose.cx + t.vx * 3, cy: t.pose.cy + t.vy * 3 };
+    const at = doubt || t.weakMs > 0 ? { ...t.good } : restingGuess(t);
     const cards = await locate(video, at.cx, at.cy, cropFor(doubt ? 2.6 : 3), doubt ? 1 : 2);
     if (t.phase !== 'track' || !tracks.has(t.id) || (!doubt && t.lostMs === 0)) return; // found meanwhile
     let best = null;
     for (const p of cards) {
-      const near = Math.hypot(p.cx - at.cx, p.cy - at.cy) < t.b * 0.75 || Math.hypot(p.cx - t.pose.cx, p.cy - t.pose.cy) < t.b * 0.75;
+      // Only a card where ours was actually last seen gets the low bar (tapped in place); one near
+      // where we guess it slid to may be a different card.
+      const near = Math.hypot(p.cx - t.pose.cx, p.cy - t.pose.cy) < t.b * 0.75
+        || (doubt && Math.hypot(p.cx - at.cx, p.cy - at.cy) < t.b * 0.75);
       if (doubt && !near) continue;
       for (const th of [p.th, p.th + Math.PI]) {
         // The template is from before: its size may differ a bit, so polish around the found pose.
@@ -600,8 +662,11 @@ window.Tracker = (() => {
     const lostCount = following.filter((t) => t.lostMs > 0).length;
     const disturbed = following.length >= 3 && lostCount / following.length >= 0.7;
     for (const t of following) {
-      if (t.lostMs > REMOVE_AFTER && t.recoverTries >= 2 && !disturbed) removeLost(t);
+      if (t.lostMs > REMOVE_AFTER && t.recoverTries >= 2 && t.scans >= 3 && !disturbed) removeLost(t);
     }
+    // One whole-picture search per tick at most, for a card lost a little while.
+    const scan = following.find((t) => t.lostMs > 250 && now >= (t.scanAt || 0));
+    if (scan && !disturbed) scanAll(scan, now);
     nextDetection(video, now);
     persist(now);
     broadcast(now);
@@ -762,7 +827,7 @@ window.Tracker = (() => {
   function debug() {
     return {
       detector, lastJob, costMs: Math.round(costMs * 10) / 10, detMs: lastDetMs, cardLen,
-      tracks: [...tracks.values()].map((t) => ({ id: t.id, phase: t.phase, x: t.x, y: t.y, score: t.score, lostMs: t.lostMs, pose: t.pose })),
+      tracks: [...tracks.values()].map((t) => ({ id: t.id, phase: t.phase, via: t.via, scans: t.scans, x: t.x, y: t.y, score: t.score, lostMs: t.lostMs, pose: t.pose })),
     };
   }
 
