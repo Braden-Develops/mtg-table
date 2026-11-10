@@ -170,6 +170,23 @@ export async function revokeInvite(config, code, by = 'Host') {
   return inv;
 }
 
+// Revoke every link at a table and end its video call.
+export async function closeTable(config, room, by = 'Host') {
+  const invites = loadInvites();
+  for (const inv of invites) {
+    if (inv.room === room && !inv.revoked) {
+      inv.revoked = true;
+      inv.revokedAt = new Date().toISOString();
+    }
+  }
+  saveInvites(invites);
+  try {
+    rooms ??= new RoomServiceClient(`http://127.0.0.1:${config.livekitPort}`, config.apiKey, config.apiSecret);
+    await rooms.deleteRoom(room);
+  } catch { /* not open */ }
+  console.log(`${by} closed table ${room}`);
+}
+
 // ---------- routes ----------
 // Returns true when it handled the request.
 // `extra` handles more host-only routes (the Discord settings) after the login check.
@@ -298,20 +315,7 @@ export async function handleHost(config, req, res, p, { send, readBody, inviteUr
   // Revoke every link at a table and end its video call.
   if (req.method === 'POST' && p === '/api/host/close') {
     const b = await body();
-    const room = String(b?.room || '');
-    const invites = loadInvites();
-    for (const inv of invites) {
-      if (inv.room === room && !inv.revoked) {
-        inv.revoked = true;
-        inv.revokedAt = new Date().toISOString();
-      }
-    }
-    saveInvites(invites);
-    try {
-      rooms ??= new RoomServiceClient(`http://127.0.0.1:${config.livekitPort}`, config.apiKey, config.apiSecret);
-      await rooms.deleteRoom(room);
-    } catch { /* not open */ }
-    console.log(`Host closed table ${room}`);
+    await closeTable(config, String(b?.room || ''));
     send(res, 204, '');
     return true;
   }

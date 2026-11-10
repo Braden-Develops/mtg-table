@@ -9,18 +9,20 @@
 //   /links    working links per table                   /revoke   revoke a link and kick the player
 //   /who      who is connected right now
 //   /hosts    owner only: let other people use these commands (add / remove / list)
-//   /setup    owner only, in a server: make an MTG Table category (#tables board, #chat, voice)
+//   /setup    owner only, in a server: make an MTG Table category (#tables board, #chat)
 //   /tables   hosts, in a server: post the live table board in this channel
 //
-// The board shows every table and who is invited / connected, updated every 15 s. Everyone in the
-// server can see it; its "My link" button re-shows links a host already sent that person (it never
-// makes new ones). Only the owner and /hosts can invite.
+// The board has a card per table (who is invited, who is playing) with buttons: Play (your link,
+// if a host invited you), Voice (the table's own voice channel), and for hosts Invite (pick people,
+// they get DMed) and Close. Below: New table (hosts) and My links. Updated every 15 s and right
+// after changes. Each table gets its own category with a chat and a voice channel, removed when the
+// table is closed from the board, or 30 minutes after the table's last link ends.
 //
 // Set up from the host page (Discord bot section): application ID, public key, bot token, owner ID.
 // With OCI Vault in use the bot token goes to the vault and is only held in memory here.
 import crypto from 'node:crypto';
 import { CONFIG_FILE, inviteUrl, loadInvites, readJson, saveInvites, writeJson } from '../scripts/lib.js';
-import { inviteActive, makeInvite, online, overLimit, revokeInvite } from './host.js';
+import { closeTable, inviteActive, makeInvite, online, overLimit, revokeInvite } from './host.js';
 import { SECRET_NAMES, UNSET, writeSecret } from './secrets.js';
 
 const API = 'https://discord.com/api/v10';
@@ -199,11 +201,11 @@ function verified(publicKey, sig, ts, raw) {
 // ---------- helpers ----------
 // "Thinking..." now, real answer later (for work that can take more than Discord's 3 seconds).
 const deferred = () => ({ type: 5, data: { flags: EPHEMERAL } });
-async function followUp(config, i, content) {
+async function followUp(config, i, content, extra = {}) {
   await fetch(`${API}/webhooks/${settings(config).appId}/${i.token}/messages/@original`, {
     method: 'PATCH',
     headers: { 'Content-Type': 'application/json', 'User-Agent': UA },
-    body: JSON.stringify({ content, allowed_mentions: { parse: [] } }),
+    body: JSON.stringify({ content, allowed_mentions: { parse: [] }, ...extra }),
   }).catch((err) => console.warn(`Discord: follow-up failed: ${err.message}`));
 }
 const reply = (content, extra = {}) => ({ type: 4, data: { content, flags: EPHEMERAL, allowed_mentions: { parse: [] }, ...extra } });
@@ -286,7 +288,7 @@ function linkFor(config, name, room, days, by = 'Discord', discordId = '') {
 
 // Makes (or reuses) the link and DMs it. Falls back to showing the link with a "Post here" button
 // when Discord won't let the bot DM them (they share no server with the bot, or block DMs).
-async function deliver(config, { friendId, name, room, days, host, hostId }) {
+async function deliver(config, { friendId, name, room, days, host, hostId, withMine = true }) {
   const friend = linkFor(config, name, room, days, `Discord (${host})`, friendId);
   boardSoon(config);
   if (friend.error) return { content: friend.error };
@@ -294,7 +296,7 @@ async function deliver(config, { friendId, name, room, days, host, hostId }) {
   const url = inviteUrl(config, inv.code);
   // The host gets a link to the same table too (reused if they already have one there).
   let mine = '';
-  if (host.toLowerCase() !== name.toLowerCase()) {
+  if (withMine && host.toLowerCase() !== name.toLowerCase()) {
     const me = linkFor(config, host, room, days, `Discord (${host})`, hostId);
     mine = me.inv ? `\nYour link: ${inviteUrl(config, me.inv.code)}` : `\n(Couldn't make your own link: ${me.error})`;
   }
@@ -338,7 +340,11 @@ async function whoText(config) {
 }
 
 // ---------- live table board ----------
-export async function boardMessage(config) {
+const VOICE_GRACE_MS = 30 * 60_000;
+const BOARD_ROWS = 4; // tables with their own row of buttons (Discord allows 5 rows; 1 is New table / My links)
+
+// Every table with a working link or someone connected: room -> { invited: Map(key -> name), online: Set(key) }
+async function tableState(config) {
   const live = await online(config); // Map room -> [names], or null when LiveKit is down
   const tables = new Map();
   const table = (room) => {
@@ -346,28 +352,115 @@ export async function boardMessage(config) {
     return tables.get(room);
   };
   for (const inv of loadInvites()) if (inviteActive(inv)) table(inv.room).invited.set(inv.name.toLowerCase(), inv.name);
-  for (const [room, names] of live || []) for (const n of names) table(room).online.add(n.toLowerCase()) && table(room).invited.set(n.toLowerCase(), table(room).invited.get(n.toLowerCase()) || n);
-  const fields = [...tables].sort(([a], [b]) => a.localeCompare(b)).slice(0, 25).map(([room, t]) => {
-    const people = [...t.invited].sort(([a], [b]) => (t.online.has(b) - t.online.has(a)) || a.localeCompare(b))
+  for (const [room, names] of live || []) {
+    for (const n of names) {
+      const t = table(room);
+      t.online.add(n.toLowerCase());
+      if (!t.invited.has(n.toLowerCase())) t.invited.set(n.toLowerCase(), n);
+    }
+  }
+  return { live, tables };
+}
+
+export async function boardMessage(config) {
+  const d = settings(config);
+  const b = d.board || {};
+  const voice = d.voice || {};
+  const { live, tables } = await tableState(config);
+  const rooms = [...tables.keys()].sort((a, c) => a.localeCompare(c));
+  const embeds = rooms.slice(0, 9).map((room) => {
+    const t = tables.get(room);
+    const people = [...t.invited].sort(([a], [c]) => (t.online.has(c) - t.online.has(a)) || a.localeCompare(c))
       .map(([key, n]) => `${t.online.has(key) ? '\u{1F7E2}' : '\u26AA'} ${n}`);
+    const vc = voice[room];
+    const v = vc?.id && !vc.goneSince ? ` \u00B7 <#${vc.id}>${vc.textId ? ` \u00B7 <#${vc.textId}>` : ''}` : '';
     return {
-      name: `${room} \u2014 ${t.online.size ? `${t.online.size} playing` : 'nobody playing'}`.slice(0, 256),
-      value: (people.join('\n') || 'No one invited').slice(0, 1024),
-      inline: true,
+      title: room.slice(0, 256),
+      color: t.online.size ? 0x3ba55d : 0x4f545c,
+      description: `${t.online.size ? `**${t.online.size} playing**` : 'Nobody playing yet'}${v}\n${people.join('\n') || 'No one invited'}`.slice(0, 4000),
     };
   });
+  if (!rooms.length) embeds.push({ title: 'No tables right now', description: 'Hosts can start one with **New table**.', color: 0x4f545c });
+  if (rooms.length > 9) embeds.push({ description: `+${rooms.length - 9} more tables (see /links)`, color: 0x4f545c });
+
+  const components = rooms.slice(0, BOARD_ROWS).map((room) => {
+    const row = [{ type: 2, style: 1, label: `Play ${room}`.slice(0, 80), custom_id: `play:${room}` }];
+    const v = voice[room];
+    if (v?.id && b.guildId) row.push({ type: 2, style: 5, label: 'Voice', url: `https://discord.com/channels/${b.guildId}/${v.id}` });
+    row.push({ type: 2, style: 2, label: 'Invite', custom_id: `invite:${room}` });
+    row.push({ type: 2, style: 4, label: 'Close', custom_id: `close:${room}` });
+    return { type: 1, components: row };
+  });
+  components.push({
+    type: 1,
+    components: [
+      { type: 2, style: 3, label: 'New table', custom_id: 'mktable' },
+      { type: 2, style: 2, label: 'My links', custom_id: 'mylink' },
+    ],
+  });
   return {
-    content: '',
-    embeds: [{
-      title: 'Tables',
-      color: 0x6f8cff,
-      description: (fields.length ? '' : 'No tables right now.\n')
-        + `${live ? '' : 'The video server is down right now.\n'}Hosts send invites. Already invited? Tap **My link**.`,
-      fields,
-    }],
-    components: [{ type: 1, components: [{ type: 2, style: 2, label: 'My link', custom_id: 'mylink' }] }],
+    content: live ? '' : '\u26A0\uFE0F The video server is down right now.',
+    embeds,
+    components,
     allowed_mentions: { parse: [] },
   };
+}
+
+// Each table gets its own category with a chat and a voice channel; removed when the table ends.
+async function deleteVoice(config, room) {
+  const d = settings(config);
+  const v = d.voice?.[room];
+  if (!v) return;
+  for (const id of [v.textId, v.id, v.categoryId]) { // children before their category
+    if (!id) continue;
+    await discordApi(config, 'DELETE', `/channels/${id}`).catch((err) => {
+      if (err.code !== 10003) console.warn(`Discord: could not remove a channel for ${room}: ${err.message}`);
+    });
+  }
+  delete d.voice[room];
+  persist(config);
+}
+
+async function makeTableChannels(config, room) {
+  const g = settings(config).board.guildId;
+  const make = (body) => discordApi(config, 'POST', `/guilds/${g}/channels`, body);
+  const cat = await make({ name: `\u{1F3B2} ${room}`.slice(0, 100), type: 4 });
+  const text = await make({ name: `${room}-chat`.slice(0, 100), type: 0, parent_id: cat.id, topic: `Chat for table ${room}` });
+  const voice = await make({ name: `${room} voice`.slice(0, 100), type: 2, parent_id: cat.id });
+  return { id: voice.id, textId: text.id, categoryId: cat.id };
+}
+
+async function syncVoice(config) {
+  const d = settings(config);
+  const b = d.board;
+  if (!b?.guildId) return;
+  const rooms = tablesList();
+  d.voice ??= {};
+  let changed = false;
+  for (const room of rooms) {
+    const v = d.voice[room];
+    if (v) {
+      if (v.goneSince) { delete v.goneSince; changed = true; }
+      continue;
+    }
+    try {
+      d.voice[room] = await makeTableChannels(config, room);
+      changed = true;
+      console.log(`Discord: made the channels for table ${room}`);
+    } catch (err) {
+      console.warn(`Discord: could not make the channels for ${room}: ${err.message}`);
+      return; // probably missing permission; try again next time
+    }
+  }
+  for (const [room, v] of Object.entries(d.voice)) {
+    if (rooms.includes(room)) continue;
+    if (!v.goneSince) { v.goneSince = Date.now(); changed = true; continue; }
+    if (Date.now() - v.goneSince > VOICE_GRACE_MS) {
+      await deleteVoice(config, room);
+      console.log(`Discord: removed the channels for ended table ${room}`);
+    }
+  }
+  if (changed) persist(config);
 }
 
 let lastBoard = '';
@@ -375,6 +468,7 @@ let boardTimer = null;
 export async function refreshBoard(config, force = false) {
   const b = settings(config).board;
   if (!b || !settings(config).token) return;
+  await syncVoice(config);
   const msg = await boardMessage(config);
   const key = JSON.stringify(msg);
   if (key === lastBoard && !force) return;
@@ -391,7 +485,7 @@ export async function refreshBoard(config, force = false) {
     }
   }
 }
-// After an invite or revoke, update soon instead of waiting for the next 15 s tick.
+// After an invite, revoke or close, update soon instead of waiting for the next 15 s tick.
 function boardSoon(config) {
   clearTimeout(boardTimer);
   boardTimer = setTimeout(() => refreshBoard(config).catch(() => {}), 1500);
@@ -401,21 +495,29 @@ export function startBoard(config) {
   setTimeout(() => refreshBoard(config, true).catch(() => {}), 5_000).unref();
 }
 
-async function postBoard(config, channelId) {
+async function postBoard(config, channelId, guildId, categoryId) {
   const d = settings(config);
   const old = d.board;
+  if (categoryId === undefined) {
+    const ch = await discordApi(config, 'GET', `/channels/${channelId}`);
+    categoryId = ch.parent_id || null;
+  }
+  // Moving the board to another server: forget voice channels that belonged to the old one.
+  if (old?.guildId && old.guildId !== guildId) d.voice = {};
+  d.board = { channelId, guildId, categoryId };
   const msg = await discordApi(config, 'POST', `/channels/${channelId}/messages`, await boardMessage(config));
-  d.board = { channelId, messageId: msg.id };
+  d.board.messageId = msg.id;
   config.discord = d;
   persist(config);
   lastBoard = '';
-  if (old && old.messageId !== msg.id) {
+  if (old?.messageId && old.messageId !== msg.id) {
     await discordApi(config, 'DELETE', `/channels/${old.channelId}/messages/${old.messageId}`).catch(() => {});
   }
+  boardSoon(config);
 }
 
-// /setup: an "MTG Table" category with #tables (only the bot posts), #chat and a voice channel.
-// Reuses channels with those names if they're already there.
+// /setup: an "MTG Table" category with #tables (only the bot posts) and #chat. Each table gets its
+// own voice channel there. Reuses channels with those names if they're already there.
 async function setupServer(config, guildId) {
   const appId = settings(config).appId;
   const existing = await discordApi(config, 'GET', `/guilds/${guildId}/channels`);
@@ -427,14 +529,13 @@ async function setupServer(config, guildId) {
     { id: appId, type: 1, allow: String(P.VIEW | P.SEND | P.EMBED | P.HISTORY) },
   ];
   const tables = find('tables', 0, cat.id) || await make({
-    name: 'tables', type: 0, parent_id: cat.id, topic: 'Live tables and who is playing. Hosts send invites; tap My link to see yours.', permission_overwrites: readOnly,
+    name: 'tables', type: 0, parent_id: cat.id, topic: 'Live tables and who is playing. Hosts invite; tap Play or My links for your link.', permission_overwrites: readOnly,
   });
   const made = [cat.name, `#${tables.name}`];
   if (!find('chat', 0, cat.id)) made.push(`#${(await make({ name: 'chat', type: 0, parent_id: cat.id })).name}`);
-  if (!find('Table talk', 2, cat.id)) made.push((await make({ name: 'Table talk', type: 2, parent_id: cat.id })).name);
-  await postBoard(config, tables.id);
+  await postBoard(config, tables.id, guildId, cat.id);
   console.log(`Discord: set up the MTG Table channels in server ${guildId}`);
-  return `Done: ${made.join(', ')}. The board in <#${tables.id}> updates by itself.`;
+  return `Done: ${made.join(', ')}. The board in <#${tables.id}> updates by itself, and each table gets its own chat and voice channels.`;
 }
 
 // Re-shows the links hosts already sent this person (never makes new ones).
@@ -445,6 +546,11 @@ function myLinks(config, userId) {
     + '\nOpen it in Chrome, Edge or Safari. Only you can see this.');
 }
 
+// People picker for inviting to a table (up to 10 at once).
+const invitePicker = (room, text) => reply(text, {
+  components: [{ type: 1, components: [{ type: 5, custom_id: `invpick:${room}`.slice(0, 100), placeholder: `Who should join ${room}?`.slice(0, 150), min_values: 1, max_values: 10 }] }],
+});
+
 // ---------- interactions ----------
 async function interact(config, i) {
   const d = settings(config);
@@ -452,12 +558,25 @@ async function interact(config, i) {
   const host = String(me.global_name || me.username || 'The host').replace(NAME_CHARS, '').trim() || 'The host';
 
   if (i.type === 3 && i.data?.custom_id === 'mylink') return myLinks(config, me.id);
+  const isHost = !!d.ownerId && (me.id === d.ownerId || (d.hosts || []).some((h) => h.id === me.id));
+  if (i.type === 3 && String(i.data?.custom_id).startsWith('play:')) {
+    const room = String(i.data.custom_id).slice(5);
+    let inv = loadInvites().find((x) => x.room === room && x.discordId === me.id && inviteActive(x));
+    if (!inv && isHost) {
+      const mine = linkFor(config, host, room, DEFAULT_DAYS, `Discord (${host})`, me.id);
+      if (mine.error) return reply(mine.error);
+      inv = mine.inv;
+      boardSoon(config);
+    }
+    if (!inv) return reply(`You're not invited to **${room}** yet. Ask a host.`);
+    return reply(`Your link to **${room}**: ${inviteUrl(config, inv.code)} (${until(inv)})\nOpen it in Chrome, Edge or Safari. Only you can see this.`);
+  }
 
   if (!d.ownerId) {
     return reply(`Almost set up. Your Discord user ID is \`${me.id}\`: paste it into the Discord section on the host page, then try again.`);
   }
   const isOwner = me.id === d.ownerId;
-  if (!isOwner && !(d.hosts || []).some((h) => h.id === me.id)) return reply('Only hosts can use this. Already invited? Tap My link on the table board.');
+  if (!isOwner && !(d.hosts || []).some((h) => h.id === me.id)) return reply('Only hosts can do that. Invited? Tap Play or My links on the table board.');
 
   // Typing in the table / link boxes.
   if (i.type === 4) {
@@ -552,6 +671,50 @@ async function interact(config, i) {
       if (room === NEW_TABLE) return newTableForm(friendId, nameParts.join(':'), days);
       return update('', await deliver(config, { friendId, name: nameParts.join(':'), room, days: Number(days), host, hostId: me.id }));
     }
+    if (kind === 'invite') return invitePicker(rest.join(':'), `Who should join **${rest.join(':')}**? They'll get the link by DM.`);
+    if (kind === 'invpick') {
+      const room = rest.join(':');
+      const ids = (i.data.values || []).filter((id) => !i.data.resolved?.users?.[id]?.bot);
+      // DMs can take a moment each, so answer "working" first and fill in the result.
+      return {
+        type: 6,
+        after: async () => {
+          const lines = [];
+          for (const friendId of ids) {
+            const name = displayName(i, friendId);
+            const r = await deliver(config, { friendId, name, room, days: DEFAULT_DAYS, host, hostId: me.id, withMine: false });
+            lines.push(r.content);
+          }
+          const mine = linkFor(config, host, room, DEFAULT_DAYS, `Discord (${host})`, me.id);
+          if (mine.inv) lines.push(`Your link: ${inviteUrl(config, mine.inv.code)}`);
+          boardSoon(config);
+          await followUp(config, i, lines.join('\n').slice(0, 1990) || 'Nobody picked.', { components: [] });
+        },
+      };
+    }
+    if (kind === 'close') {
+      const room = rest.join(':');
+      return reply(`Close **${room}**? Everyone's link stops working, the video call ends and its chat and voice channels are removed.`, {
+        components: [{ type: 1, components: [{ type: 2, style: 4, label: `Close ${room}`.slice(0, 80), custom_id: `closeyes:${room}` }] }],
+      });
+    }
+    if (kind === 'closeyes') {
+      const room = rest.join(':');
+      await closeTable(config, room, `Discord (${host})`);
+      await deleteVoice(config, room);
+      boardSoon(config);
+      return update(`Closed **${room}**.`);
+    }
+    if (kind === 'mktable') {
+      return {
+        type: 9,
+        data: {
+          custom_id: 'mktable',
+          title: 'New table',
+          components: [{ type: 1, components: [{ type: 4, custom_id: 'room', style: 1, label: 'Table name', placeholder: 'e.g. friday', min_length: 1, max_length: 32, required: true }] }],
+        },
+      };
+    }
     if (kind === 'post') {
       const inv = loadInvites().find((x) => x.code === rest[0] && inviteActive(x));
       if (!inv) return reply('That link no longer works.');
@@ -561,6 +724,14 @@ async function interact(config, i) {
   // The new-table popup was filled in.
   if (i.type === 5) {
     const [kind, friendId, days, ...nameParts] = String(i.data.custom_id).split(':');
+    if (kind === 'mktable') {
+      const room = String(i.data.components?.[0]?.components?.[0]?.value || '').trim();
+      if (tablesList().includes(room)) return invitePicker(room, `**${room}** already exists. Who should join?`);
+      const mine = linkFor(config, host, room, DEFAULT_DAYS, `Discord (${host})`, me.id);
+      if (mine.error) return reply(mine.error);
+      boardSoon(config);
+      return invitePicker(room, `Made **${room}**; its chat and voice channels appear in a moment. Your link: ${inviteUrl(config, mine.inv.code)}\nWho should join?`);
+    }
     if (kind === 'newtable') {
       const room = String(i.data.components?.[0]?.components?.[0]?.value || '').trim();
       const result = await deliver(config, { friendId, name: nameParts.join(':'), room, days: Number(days), host, hostId: me.id });
