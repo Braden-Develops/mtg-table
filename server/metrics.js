@@ -1,6 +1,6 @@
 // Prometheus metrics at GET /metrics, for Grafana: who is connected, to which table, for how
 // long, plus traffic and activity counters. Every connection and disconnection is also written
-// to the log ("Player joined ..." / "Player left ... after 42m"), with address and device.
+// to the log ("Player joined ..." / "Player left ... after 42m"), with address, device and user agent.
 //
 // Locked behind a bearer token (npm run metrics-token); without one set the endpoint doesn't
 // exist (404). Rate-limited per address, and wrong tokens feed the same fail2ban jail as the
@@ -20,14 +20,15 @@ export function count(kind) {
 }
 
 // Address and device of each video token handed out, so the join log can say where from.
-const tokens = new Map(); // identity -> { ip, device }
+const tokens = new Map(); // identity -> { ip, ua, device }
 export function noteToken(identity, ip, ua) {
-  tokens.set(identity, { ip, device: device(ua) });
+  ua = String(ua || '').slice(0, 300);
+  tokens.set(identity, { ip, ua, device: device(ua) });
   setTimeout(() => tokens.delete(identity), 15 * 60_000).unref();
 }
 
 // ---------- who is connected ----------
-const online = new Map(); // identity -> { name, room, since, device }
+const online = new Map(); // identity -> { name, room, since, ip, ua, device }
 const perPlayer = new Map(); // `${name}\0${room}` -> { name, room, seconds, sessions }
 let lastSample = Date.now();
 let lk = null;
@@ -57,11 +58,11 @@ async function sample(config) {
         const name = p.name || p.identity;
         const since = Number(p.joinedAt) ? Number(p.joinedAt) * 1000 : now;
         const from = tokens.get(p.identity) || {};
-        online.set(p.identity, { name, room: r.name, since, device: from.device || '' });
+        online.set(p.identity, { name, room: r.name, since, ip: from.ip || '', ua: from.ua || '', device: from.device || '' });
         const t = totals(name, r.name);
         t.sessions += 1;
         t.seconds += Math.max(0, (now - since) / 1000);
-        console.log(`Player joined: ${name} at table ${r.name} from ${from.ip || 'unknown address'}${from.device ? ` (${from.device})` : ''}`);
+        console.log(`Player joined: ${name} at table ${r.name} from ${from.ip || 'unknown address'}${from.device ? ` (${from.device})` : ''}${from.ua ? ` UA: ${from.ua}` : ''}`);
       }
     }
   } catch {
@@ -70,7 +71,7 @@ async function sample(config) {
   for (const [id, s] of online) {
     if (seen.has(id)) continue;
     online.delete(id);
-    console.log(`Player left: ${s.name} at table ${s.room} after ${minutes(now - s.since)}`);
+    console.log(`Player left: ${s.name} at table ${s.room} from ${s.ip || 'unknown address'} after ${minutes(now - s.since)}`);
   }
 }
 
@@ -117,6 +118,8 @@ function render() {
   const players = [...perPlayer.values()];
   metric('mtg_player_online', 'gauge', 'Player currently connected to a table (1 per connection).',
     people.map((s) => [{ name: s.name, table: s.room, device: s.device }, 1]));
+  metric('mtg_player_connection_info', 'gauge', 'Each live connection with its address and full user agent (always 1).',
+    people.map((s) => [{ name: s.name, table: s.room, ip: s.ip, device: s.device, user_agent: s.ua }, 1]));
   metric('mtg_player_session_seconds', 'gauge', 'How long the current connection has lasted.',
     people.map((s) => [{ name: s.name, table: s.room }, Math.round((now - s.since) / 1000)]));
   metric('mtg_player_connected_seconds_total', 'counter', 'Time connected, per player and table, since the app started.',
