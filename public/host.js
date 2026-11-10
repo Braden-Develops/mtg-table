@@ -197,6 +197,10 @@
       const url = id.endsWith('server') ? s.installServer : s.installUser;
       if (url) a.href = url; else a.removeAttribute('href');
     }
+    $('dc-hosts').hidden = !s.hosts?.length;
+    $('dc-host-list').innerHTML = (s.hosts || []).map((h) => `
+      <li><div class="who"><strong>${esc(h.name)}</strong><span class="muted small">${esc(h.id)}</span></div>
+        <div class="acts"><button type="button" class="chip" data-host-id="${esc(h.id)}">Remove</button></div></li>`).join('');
     $('dc-register').disabled = !(s.appId && s.tokenSet);
     $('dc-clear').hidden = !(s.appId || s.publicKeySet || s.tokenSet);
   }
@@ -231,6 +235,11 @@
   $('dc-clear').addEventListener('click', (e) => {
     if (!armed(e.currentTarget, 'Sure? Forgets the token')) return;
     discordCall('/api/host/discord/clear', {}, () => 'Bot settings removed. Clear the endpoint URL in the Developer Portal too.');
+  });
+  $('dc-host-list').addEventListener('click', (e) => {
+    const btn = e.target.closest('button[data-host-id]');
+    if (!btn || !armed(btn, 'Sure?')) return;
+    discordCall('/api/host/discord/hosts/remove', { id: btn.dataset.hostId }, () => 'Removed.');
   });
   $('dc-copy-endpoint').addEventListener('click', (e) => copy($('dc-endpoint').textContent, e.currentTarget));
 

@@ -1008,6 +1008,9 @@ body.dragging-card, body.dragging-card * { cursor: grabbing !important; }
 .host-dc-form input { font-family: ui-monospace, Consolas, monospace; font-size: var(--fs-sm); }
 .host-dc-acts { grid-column: 1 / -1; display: flex; gap: var(--sp-2); flex-wrap: wrap; }
 .host-discord #dc-msg { margin: var(--sp-3) 0 0; }
+.host-dc-hosts { margin: 0 0 var(--sp-4); }
+.host-dc-hosts h4 { margin: 0 0 var(--sp-2); font-size: var(--fs-sm); color: var(--muted); font-weight: 600; }
+.host-dc-hosts p { margin: var(--sp-2) 0 0; }
 @media (max-width: 680px) {
   .host-dc-form { grid-template-columns: 1fr; }
   .host-wrap { padding: var(--sp-5) var(--sp-3); }

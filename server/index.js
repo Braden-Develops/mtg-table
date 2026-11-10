@@ -18,7 +18,7 @@ import { autocomplete, namedCard } from './scryfall.js';
 import { allDeckCards, getDeck, loadDeck, removeDeck, roomDecks } from './decks.js';
 import { identify, indexCards, modelsAvailable } from './recognize.js';
 import { count, handleMetrics, noteToken, startMetrics } from './metrics.js';
-import { clearDiscord, discordStatus, handleDiscord, registerCommands, saveDiscord } from './discord.js';
+import { clearDiscord, discordStatus, handleDiscord, registerCommands, removeHost, saveDiscord } from './discord.js';
 import { loadSecrets } from './secrets.js';
 import {
   clientIp, findInvite, handleHost, isHttps, overLimit, peek,
@@ -459,6 +459,10 @@ async function hostDiscord(req, res, p, body) {
   } else if (req.method === 'POST' && p === '/api/host/discord/register') {
     const result = await registerCommands(config);
     send(res, result.error ? 400 : 200, { ...result, status: discordStatus(config) });
+  } else if (req.method === 'POST' && p === '/api/host/discord/hosts/remove') {
+    const b = await body();
+    removeHost(config, b?.id);
+    send(res, 200, { status: discordStatus(config) });
   } else if (req.method === 'POST' && p === '/api/host/discord/clear') {
     await clearDiscord(config);
     send(res, 200, { status: discordStatus(config) });

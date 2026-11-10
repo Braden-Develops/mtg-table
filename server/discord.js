@@ -8,6 +8,7 @@
 //   /invite friend [table] [expires]                     same, as a slash command
 //   /links    working links per table                   /revoke   revoke a link and kick the player
 //   /who      who is connected right now
+//   /hosts    owner only: let other people use these commands (add / remove / list)
 //
 // Set up from the host page (Discord bot section): application ID, public key, bot token, owner ID.
 // With OCI Vault in use the bot token goes to the vault and is only held in memory here.
@@ -50,6 +51,14 @@ export const COMMANDS = [
     options: [{ type: 3, name: 'link', description: 'Whose link', required: true, autocomplete: true }],
   },
   { type: 1, name: 'who', description: 'Who is connected right now', ...where },
+  {
+    type: 1, name: 'hosts', description: 'Who else can use this bot (owner only)', ...where,
+    options: [
+      { type: 1, name: 'add', description: 'Let someone send invites with this bot', options: [{ type: 6, name: 'user', description: 'Who', required: true }] },
+      { type: 1, name: 'remove', description: 'Stop someone using this bot', options: [{ type: 6, name: 'user', description: 'Who', required: true }] },
+      { type: 1, name: 'list', description: 'Everyone who can use this bot' },
+    ],
+  },
 ];
 
 // ---------- settings (host page) ----------
@@ -62,6 +71,7 @@ export function discordStatus(config) {
   return {
     appId: id,
     ownerId: d.ownerId || '',
+    hosts: (d.hosts || []).map((h) => ({ id: h.id, name: h.name })),
     publicKeySet: !!d.publicKey,
     tokenSet: !!d.token,
     registeredAt: d.registeredAt || null,
@@ -111,6 +121,16 @@ export async function saveDiscord(config, b) {
     if (d.token && d.appId) return { registered: await registerCommands(config) };
   }
   return {};
+}
+
+export function removeHost(config, id) {
+  const d = settings(config);
+  const before = (d.hosts || []).length;
+  d.hosts = (d.hosts || []).filter((h) => h.id !== String(id));
+  if (d.hosts.length === before) return false;
+  persist(config);
+  console.log(`Discord: host page removed a bot user (${id})`);
+  return true;
 }
 
 export async function clearDiscord(config) {
@@ -230,31 +250,31 @@ function tablePicker(friendId, name, days) {
 }
 
 // A working link at this table for `name`, made if there isn't one. Returns { inv, reused } or { error }.
-function linkFor(config, name, room, days) {
+function linkFor(config, name, room, days, by = 'Discord') {
   const inv = loadInvites().find((x) => x.room === room && x.name.toLowerCase() === name.toLowerCase() && inviteActive(x));
   if (inv) return { inv, reused: true };
-  const made = makeInvite(config, { name, room, days, by: 'Discord' });
+  const made = makeInvite(config, { name, room, days, by });
   return made.error ? { error: made.error } : { inv: made.inv, reused: false };
 }
 
 // Makes (or reuses) the link and DMs it. Falls back to showing the link with a "Post here" button
 // when Discord won't let the bot DM them (they share no server with the bot, or block DMs).
 async function deliver(config, { friendId, name, room, days, host }) {
-  const friend = linkFor(config, name, room, days);
+  const friend = linkFor(config, name, room, days, `Discord (${host})`);
   if (friend.error) return { content: friend.error };
   const { inv, reused } = friend;
   const url = inviteUrl(config, inv.code);
   // The host gets a link to the same table too (reused if they already have one there).
   let mine = '';
   if (host.toLowerCase() !== name.toLowerCase()) {
-    const me = linkFor(config, host, room, days);
+    const me = linkFor(config, host, room, days, `Discord (${host})`);
     mine = me.inv ? `\nYour link: ${inviteUrl(config, me.inv.code)}` : `\n(Couldn't make your own link: ${me.error})`;
   }
   const text = `${host} invited you to play Magic at table **${room}**: ${url}\nOpen it in Chrome, Edge or Safari; the link ${until(inv)}.`;
   try {
     const ch = await discordApi(config, 'POST', '/users/@me/channels', { recipient_id: friendId });
     await discordApi(config, 'POST', `/channels/${ch.id}/messages`, { content: text, allowed_mentions: { parse: [] } });
-    console.log(`Discord: sent ${name} a link to table ${room}`);
+    console.log(`Discord: ${host} sent ${name} a link to table ${room}`);
     return { content: `Sent <@${friendId}> ${reused ? 'their existing' : 'a new'} link to table **${room}** (${until(inv)}).${mine}` };
   } catch (err) {
     console.warn(`Discord: could not DM ${name}: ${err.message}`);
@@ -298,7 +318,8 @@ async function interact(config, i) {
   if (!d.ownerId) {
     return reply(`Almost set up. Your Discord user ID is \`${me.id}\`: paste it into the Discord section on the host page, then try again.`);
   }
-  if (me.id !== d.ownerId) return reply('This bot only takes commands from its owner.');
+  const isOwner = me.id === d.ownerId;
+  if (!isOwner && !(d.hosts || []).some((h) => h.id === me.id)) return reply('This bot only takes commands from its owner.');
 
   // Typing in the table / link boxes.
   if (i.type === 4) {
@@ -334,6 +355,35 @@ async function interact(config, i) {
       }
       case 'links':
         return reply(linksText(config));
+      case 'hosts': {
+        if (!isOwner) return reply('Only the owner can change who can use this bot.');
+        const sub = i.data.options?.[0];
+        const list = d.hosts || [];
+        if (sub?.name === 'list') {
+          return reply(list.length ? `Besides you, these people can use the bot:\n${list.map((h) => `- <@${h.id}> (${h.name})`).join('\n')}` : 'Only you can use the bot. Add someone with /hosts add.');
+        }
+        const id = sub?.options?.find((o) => o.name === 'user')?.value;
+        if (!SNOWFLAKE.test(String(id || ''))) return reply('Pick a user.');
+        if (sub.name === 'add') {
+          if (id === d.ownerId) return reply("That's you; you can always use it.");
+          if (i.data.resolved?.users?.[id]?.bot) return reply("Bots can't be hosts.");
+          const name = displayName(i, id);
+          d.hosts = [...list.filter((h) => h.id !== id), { id, name, addedAt: new Date().toISOString() }];
+          config.discord = d;
+          persist(config);
+          console.log(`Discord: ${host} let ${name} (${id}) use the bot`);
+          return reply(`<@${id}> can now send invites with this bot (right-click a friend > Apps > Invite to MTG table, /invite, /links, /revoke, /who). They need the bot added to their account or to a server they're in.`);
+        }
+        if (sub.name === 'remove') {
+          if (!list.some((h) => h.id === id)) return reply(`<@${id}> wasn't a host.`);
+          d.hosts = list.filter((h) => h.id !== id);
+          config.discord = d;
+          persist(config);
+          console.log(`Discord: ${host} stopped ${id} using the bot`);
+          return reply(`<@${id}> can no longer use this bot. Links they already sent keep working; revoke them with /revoke if needed.`);
+        }
+        return reply('Use /hosts add, /hosts remove or /hosts list.');
+      }
       case 'who':
         return reply(await whoText(config));
       case 'revoke': {
