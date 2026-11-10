@@ -133,7 +133,7 @@ async function kick(config, room, name) {
 
 // ---------- making and revoking links (host page and Discord bot) ----------
 // Returns { inv } or { error, clash }.
-export function makeInvite(config, { name, room, days, by = 'Host' }) {
+export function makeInvite(config, { name, room, days, by = 'Host', discordId }) {
   name = String(name || '').trim();
   room = String(room || '').trim();
   days = Number(days) || 0;
@@ -149,6 +149,7 @@ export function makeInvite(config, { name, room, days, by = 'Host' }) {
     createdAt: new Date().toISOString(),
     expiresAt: days > 0 ? new Date(Date.now() + days * 86_400_000).toISOString() : null,
     revoked: false,
+    ...(discordId ? { discordId } : {}),
   };
   invites.push(inv);
   saveInvites(invites);

@@ -18,7 +18,7 @@ import { autocomplete, namedCard } from './scryfall.js';
 import { allDeckCards, getDeck, loadDeck, removeDeck, roomDecks } from './decks.js';
 import { identify, indexCards, modelsAvailable } from './recognize.js';
 import { count, handleMetrics, noteToken, startMetrics } from './metrics.js';
-import { clearDiscord, discordStatus, handleDiscord, registerCommands, removeHost, saveDiscord } from './discord.js';
+import { clearDiscord, discordStatus, handleDiscord, registerCommands, removeHost, saveDiscord, startBoard } from './discord.js';
 import { loadSecrets } from './secrets.js';
 import {
   clientIp, findInvite, handleHost, isHttps, overLimit, peek,
@@ -477,6 +477,7 @@ async function hostDiscord(req, res, p, body) {
 if (config.discord?.appId && config.discord?.token) {
   registerCommands(config).then((r) => console.log(r.error ? `Discord: ${r.error}` : 'Discord commands registered'));
 }
+startBoard(config);
 startMetrics(config);
 const onRequest = (req, res) => handle(req, res).catch((err) => {
   console.error(err);
