@@ -381,7 +381,8 @@ body:has(#room:not([hidden])) { overflow: hidden; }
   box-shadow: 0 0 0 1px var(--border-soft), var(--shadow-md);
   transition: box-shadow .2s var(--ease), left .25s var(--ease), top .25s var(--ease), width .25s var(--ease), height .25s var(--ease);
 }
-.tile.focused { cursor: zoom-out; }
+.tile.focused,
+.grid:has(> .tile.focused) { cursor: zoom-out; }
 .tile { container: tile / size; }
 .tile.speaking { box-shadow: 0 0 0 2px var(--accent), var(--shadow-md); }
 .tile.active-turn { box-shadow: 0 0 0 2px var(--gold), 0 0 24px rgba(240, 194, 75, .25), var(--shadow-md); }
@@ -886,6 +887,7 @@ body.dragging-card, body.dragging-card * { cursor: grabbing !important; }
   color: var(--muted);
 }
 .cam-row output { color: var(--text); text-align: right; font-variant-numeric: tabular-nums; }
+.cam-row > .chip { justify-self: start; min-width: 64px; }
 .cam-row select { grid-column: 2 / 4; min-height: var(--h-sm); justify-content: flex-start; }
 @media (max-width: 480px) { .cam-row { grid-template-columns: 1fr; } .cam-row select { grid-column: auto; } }
 

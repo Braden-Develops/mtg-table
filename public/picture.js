@@ -1,8 +1,8 @@
-/* Picture processor for your own camera: brightness, contrast, saturation and sharpening, done on the
+/* Picture processor for your own camera: rotation, brightness, contrast, saturation and sharpening, done on the
    GPU (WebGL) before the video is sent, so everyone sees the adjusted picture. Works in every browser.
    Plugs into LiveKit's track processor API. Only runs while some setting differs from default. */
 window.Picture = (() => {
-  const DEFAULTS = { brightness: 100, contrast: 100, saturation: 100, sharpen: 0 };
+  const DEFAULTS = { brightness: 100, contrast: 100, saturation: 100, sharpen: 0, rotate: 0 };
 
   const VERTEX = `
     attribute vec2 p;
@@ -12,13 +12,14 @@ window.Picture = (() => {
     precision mediump float;
     uniform sampler2D tex;
     uniform vec2 px;
-    uniform float bright, contrast, sat, sharp;
+    uniform float bright, contrast, sat, sharp, flip;
     varying vec2 v;
     void main() {
-      vec3 c = texture2D(tex, v).rgb;
+      vec2 uv = flip > 0.5 ? vec2(1.0) - v : v; // rotate 180 degrees
+      vec3 c = texture2D(tex, uv).rgb;
       if (sharp > 0.0) {
-        vec3 n = texture2D(tex, v + vec2(px.x, 0.0)).rgb + texture2D(tex, v - vec2(px.x, 0.0)).rgb
-               + texture2D(tex, v + vec2(0.0, px.y)).rgb + texture2D(tex, v - vec2(0.0, px.y)).rgb;
+        vec3 n = texture2D(tex, uv + vec2(px.x, 0.0)).rgb + texture2D(tex, uv - vec2(px.x, 0.0)).rgb
+               + texture2D(tex, uv + vec2(0.0, px.y)).rgb + texture2D(tex, uv - vec2(0.0, px.y)).rgb;
         c += sharp * (4.0 * c - n);
       }
       c *= bright;
@@ -70,6 +71,7 @@ window.Picture = (() => {
       gl.uniform1f(uni.contrast, p.contrast / 100);
       gl.uniform1f(uni.sat, p.saturation / 100);
       gl.uniform1f(uni.sharp, p.sharpen / 100);
+      gl.uniform1f(uni.flip, Number(p.rotate) === 180 ? 1 : 0);
       gl.drawArrays(gl.TRIANGLE_STRIP, 0, 4);
     }
 
@@ -99,7 +101,7 @@ window.Picture = (() => {
       gl.bindTexture(gl.TEXTURE_2D, gl.createTexture());
       for (const [k, v] of [[gl.TEXTURE_MIN_FILTER, gl.LINEAR], [gl.TEXTURE_MAG_FILTER, gl.LINEAR],
         [gl.TEXTURE_WRAP_S, gl.CLAMP_TO_EDGE], [gl.TEXTURE_WRAP_T, gl.CLAMP_TO_EDGE]]) gl.texParameteri(gl.TEXTURE_2D, k, v);
-      uni = Object.fromEntries(['px', 'bright', 'contrast', 'sat', 'sharp'].map((n) => [n, gl.getUniformLocation(prog, n)]));
+      uni = Object.fromEntries(['px', 'bright', 'contrast', 'sat', 'sharp', 'flip'].map((n) => [n, gl.getUniformLocation(prog, n)]));
       gl.viewport(0, 0, canvas.width, canvas.height);
 
       const fps = s.frameRate || 30;
@@ -173,8 +175,9 @@ window.Picture = (() => {
     sync(); // values are read every frame, so no restart is needed while it's running
   }
 
+  // Rotation is about how the camera is mounted, so Reset leaves it alone.
   function reset() {
-    params = { ...DEFAULTS };
+    params = { ...DEFAULTS, rotate: params.rotate };
     try { localStorage.setItem('picture', JSON.stringify(params)); } catch { /* ignore */ }
     return sync();
   }

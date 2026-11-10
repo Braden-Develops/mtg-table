@@ -185,7 +185,11 @@ window.Adjust = (() => {
 
   function pictureHtml() {
     const p = window.Picture.get();
+    const rotated = Number(p.rotate) === 180;
     return `<h4>Picture <span class="muted small">(any browser, everyone sees it)</span></h4>
+      <div class="cam-row">Rotate 180°
+        <button type="button" class="chip ${rotated ? 'on' : ''}" data-rotate aria-pressed="${rotated}">${rotated ? 'On' : 'Off'}</button>
+      </div>
       ${PICTURE_SLIDERS.map(([k, label, min, max, unit]) => `<label class="cam-row">${label}
         <input type="range" data-pic="${k}" min="${min}" max="${max}" step="5" value="${p[k]}">
         <output>${p[k]}${unit}</output>
@@ -251,6 +255,16 @@ window.Adjust = (() => {
       }
       await applyCamera({ ...extra, [key]: value });
       save(cameraKey(), collect());
+    });
+    // Upside-down camera: rotate what everyone sees (stickers, drawings and card lookup follow along).
+    dlg.addEventListener('click', (e) => {
+      const btn = e.target.closest('[data-rotate]');
+      if (!btn) return;
+      const on = Number(window.Picture.get().rotate) !== 180;
+      window.Picture.set('rotate', on ? 180 : 0);
+      btn.classList.toggle('on', on);
+      btn.setAttribute('aria-pressed', String(on));
+      btn.textContent = on ? 'On' : 'Off';
     });
     $('camera-reset').addEventListener('click', async () => {
       await window.Picture.reset();

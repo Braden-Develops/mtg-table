@@ -15,8 +15,17 @@
     // Clicks inside a menu keep it open (sliders, toggles), except actions that leave the page.
     if (!e.target.closest('.menu-pop')) closeAll();
   });
+  // ---------- back to gallery: everyone's video the same size again
+  const unfocus = () => {
+    for (const t of document.querySelectorAll('#grid > .tile.focused')) t.classList.remove('focused');
+  };
+
   document.addEventListener('keydown', (e) => {
-    if (e.key === 'Escape') closeAll();
+    if (e.key !== 'Escape') return;
+    // Escape closes an open menu first; with nothing else open it leaves the enlarged view.
+    if (document.querySelector('.menu.open')) return closeAll();
+    if (document.querySelector('dialog[open]') || e.target.closest?.('input, textarea, select')) return;
+    unfocus();
   });
 
   // ---------- panel buttons reflect whether their panel is open
@@ -102,6 +111,10 @@
     link('game-btn', 'game-panel');
     link('deck-btn', 'deck-panel');
     const grid = document.getElementById('grid');
+    // A click on empty space around the videos (not on a video) returns to gallery view.
+    grid.addEventListener('click', (e) => {
+      if (e.target === grid) unfocus();
+    });
     new ResizeObserver(relayout).observe(grid);
     new MutationObserver(relayout).observe(grid, { childList: true, subtree: true, attributes: true, attributeFilter: ['class'] });
     window.addEventListener('resize', relayout);
