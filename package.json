@@ -6,6 +6,7 @@
     "setup": "node scripts/setup.js",
     "invite": "node scripts/invite.js",
     "host-password": "node scripts/host-password.js",
+    "metrics-token": "node scripts/metrics-token.js",
     "start": "node server/index.js"
   },
   "author": "",

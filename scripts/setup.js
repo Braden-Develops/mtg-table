@@ -36,6 +36,7 @@ const config = {
   httpPort: existing.httpPort || 8080,
   behindProxy: existing.behindProxy || false,
   ...(existing.hostPassword ? { hostPassword: existing.hostPassword } : {}),
+  ...(existing.metricsToken ? { metricsToken: existing.metricsToken } : {}),
 };
 const domain = argValue('--domain');
 if (domain) {

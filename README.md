@@ -98,6 +98,25 @@ Set your home network to **Private** in Windows settings, and allow both program
 Each video tile shows live stats: what you're sending (resolution, fps, bitrate, and why quality is
 being reduced if it is) and what you receive from each player. Hide them with the toolbar button.
 
+## Metrics (Prometheus / Grafana)
+
+`GET /metrics` serves Prometheus metrics: who is connected and at which table
+(`mtg_player_online`), how long the current connection has lasted (`mtg_player_session_seconds`),
+total time and number of connections per player and table (`mtg_player_connected_seconds_total`,
+`mtg_player_sessions_total`), server network traffic, and card lookups / decks loaded. Each join
+and leave is also logged (`journalctl -u mtg-table | grep Player`) with the address, device and
+duration.
+
+It is off until you make a token: on the server run
+`sudo -u mtg npm --prefix /opt/mtg-table run metrics-token`, then `sudo systemctl restart mtg-table`.
+Scrape it with that token (Prometheus `authorization: { credentials: <token> }`, or Grafana Alloy's
+`bearer_token`). Each address gets 20 requests a minute; 5 wrong tokens in an hour block the
+address, and fail2ban bans it for a day. `npm run metrics-token -- off` turns it off again.
+
+Handy queries: hours per player this month,
+`sum by (name) (increase(mtg_player_connected_seconds_total[30d])) / 3600`; who is on now,
+`mtg_player_session_seconds / 60`.
+
 ## Data folder
 
 `data/` holds secrets (API secret, certificate key, invite codes). It's in `.gitignore`. Never share it.

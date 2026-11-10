@@ -17,6 +17,7 @@ import {
 import { autocomplete, namedCard } from './scryfall.js';
 import { allDeckCards, getDeck, loadDeck, removeDeck, roomDecks } from './decks.js';
 import { identify, indexCards, modelsAvailable } from './recognize.js';
+import { count, handleMetrics, noteToken, startMetrics } from './metrics.js';
 import {
   clientIp, findInvite, handleHost, isHttps, overLimit, peek,
 } from './host.js';
@@ -212,6 +213,7 @@ async function handle(req, res) {
   };
   const BAD_LINK = 'This invite link is not valid. Ask the host for a new one.';
 
+  if (handleMetrics(config, req, res, p, ip, send)) return;
   if (await handleHost(config, req, res, p, { send, readBody, inviteUrl })) return;
 
   if (req.method === 'GET' && (p === '/' || p === '/index.html')) {
@@ -240,6 +242,7 @@ async function handle(req, res) {
   if (req.method === 'GET' && inviteMatch) {
     const invite = guest(inviteMatch[1], 'invite', 60, 404, BAD_LINK);
     if (!invite) return;
+    count('invitesOpened');
     return send(res, 200, { name: invite.name, room: invite.room });
   }
 
@@ -295,6 +298,7 @@ async function handle(req, res) {
     try {
       const { summary, commanders } = await loadDeck(invite.room, invite.name, body.text);
       const result = loadedDeckResult(invite, summary, commanders);
+      count('decks');
       return send(res, 200, result);
     } catch (err) {
       return send(res, 400, { error: err.message || 'Could not load that deck.' });
@@ -322,6 +326,7 @@ async function handle(req, res) {
     const player = url.searchParams.get('player') || '';
     const clamp = (v) => Math.max(0, Math.min(1, Number(v) || 0.5));
     const decks = roomDecks(invite.room);
+    count('identify');
     if (decks.length === 0) return send(res, 200, { found: false, reason: 'nodecks' });
     // The player's own deck goes first so their cards win ties.
     decks.sort((a, b) => (b.owner === player) - (a.owner === player));
@@ -380,6 +385,7 @@ async function handle(req, res) {
 
     // A random suffix lets the same person join from two devices (handy for testing).
     const identity = `${invite.name}-${crypto.randomBytes(3).toString('hex')}`;
+    noteToken(identity, ip, req.headers['user-agent']);
     const token = new AccessToken(config.apiKey, config.apiSecret, {
       identity,
       name: invite.name,
@@ -406,6 +412,7 @@ async function handle(req, res) {
 }
 
 // ---------- start ----------
+startMetrics(config);
 const onRequest = (req, res) => handle(req, res).catch((err) => {
   console.error(err);
   if (!res.headersSent) send(res, 500, { error: 'Server error' });
