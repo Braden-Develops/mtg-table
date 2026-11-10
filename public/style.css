@@ -1034,3 +1034,4 @@ body.dragging-card, body.dragging-card * { cursor: grabbing !important; }
 .cam-preview.zoomed video { transform: scale(2); }
 .cam-preview .chip { position: absolute; right: var(--sp-2); bottom: var(--sp-2); background: var(--glass-strong); }
 .cam-preview .chip.on { background: var(--accent); color: #fff; }
+.read-toast { bottom: 76px; }

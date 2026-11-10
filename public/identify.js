@@ -32,11 +32,11 @@ window.Identify = (() => {
 
   // ---------- cropping ----------
   // Cut a square around (x, y) (0-1 over the picture) out of a playing <video>.
-  function crop(video, x, y) {
+  function crop(video, x, y, frac = CROP) {
     const vw = video.videoWidth;
     const vh = video.videoHeight;
     if (!vw || !vh) return null;
-    const side = Math.round(Math.min(vw, vh) * CROP);
+    const side = Math.round(Math.min(vw, vh) * Math.min(1, frac));
     const cx = x * vw;
     const cy = y * vh;
     const left = Math.round(Math.max(0, Math.min(vw - side, cx - side / 2)));
@@ -45,17 +45,23 @@ window.Identify = (() => {
     canvas.width = side;
     canvas.height = side;
     canvas.getContext('2d').drawImage(video, left, top, side, side, 0, 0, side, side);
-    return { canvas, hx: (cx - left) / side, hy: (cy - top) / side };
+    return { canvas, hx: (cx - left) / side, hy: (cy - top) / side, left, top, side, vw, vh };
   }
 
-  async function ask(video, x, y, player) {
-    const c = crop(video, x, y);
+  async function ask(video, x, y, player, frac) {
+    const c = crop(video, x, y, frac);
     if (!c) throw new Error('That video is not playing yet.');
     const blob = await new Promise((resolve) => c.canvas.toBlob(resolve, 'image/jpeg', 0.92));
     const q = new URLSearchParams({ code, player, x: c.hx.toFixed(4), y: c.hy.toFixed(4) });
     const res = await fetch(`/api/identify?${q}`, { method: 'POST', headers: { 'Content-Type': 'image/jpeg' }, body: blob });
     const data = await res.json();
     if (!res.ok) throw new Error(data.error || 'Recognition failed.');
+    // The card's outline over the whole picture (0-1), so a sticker placed from this can follow
+    // the card straight away instead of the tracker searching for it again.
+    if (Array.isArray(data.quad) && data.quad.length === 4) {
+      data.frameQuad = data.quad.map(([qx, qy]) => [(c.left + qx * c.side) / c.vw, (c.top + qy * c.side) / c.vh]);
+      if (video === localVideo()) window.Tracker?.noteIdentified(x, y, data.frameQuad);
+    }
     return data;
   }
 
@@ -208,5 +214,9 @@ window.Identify = (() => {
     }
   }
 
-  return { init, setRoom, onData, clickAt };
+  // Read a card on my own camera without the dialog (cards held up to the camera). frac: the crop's
+  // size as a share of the picture's short side. Resolves with the server's answer.
+  const read = (video, x, y, frac) => ask(video, x, y, me, frac);
+
+  return { init, setRoom, onData, clickAt, read };
 })();
