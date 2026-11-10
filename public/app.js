@@ -17,7 +17,6 @@
   };
 
   let previewVideo = null; // LocalVideoTrack shown in the lobby
-  let previewAudio = null; // LocalAudioTrack chosen in the lobby
   let room = null;
   let statsTimer = null;
   const tiles = new Map(); // participant identity -> tile element
@@ -46,7 +45,6 @@
       store.set('cameraId', e.target.value);
       await startPreview(e.target.value);
     });
-    $('mic-select').addEventListener('change', (e) => store.set('micId', e.target.value));
     $('quality-select').addEventListener('change', async (e) => {
       store.set('quality', e.target.value);
       await startPreview($('camera-select').value);
@@ -92,8 +90,6 @@
     };
     const activeCam = previewVideo?.mediaStreamTrack.getSettings().deviceId;
     fill($('camera-select'), 'videoinput', store.get('cameraId'), activeCam);
-    fill($('mic-select'), 'audioinput', store.get('micId'));
-    if ($('mic-select').length === 0) $('mic-select').add(new Option('No microphone found', ''));
   }
 
   // ---------------- join ----------------
@@ -117,6 +113,7 @@
         dynacast: true,
       });
       wireRoomEvents();
+      window.Identify.setRoom(room);
       await room.connect(auth.serverUrl, auth.token);
 
       if (!previewVideo) await startPreview($('camera-select').value);
@@ -133,16 +130,6 @@
           degradationPreference: 'maintain-resolution',
         });
         window.Adjust.setLocalTrack(previewVideo);
-      }
-
-      const micId = $('mic-select').value;
-      if (micId) {
-        try {
-          previewAudio = await LK.createLocalAudioTrack({ deviceId: micId, echoCancellation: true, noiseSuppression: true });
-          await room.localParticipant.publishTrack(previewAudio, { source: Track.Source.Microphone });
-        } catch (err) {
-          console.warn('Microphone unavailable', err);
-        }
       }
 
       $('lobby').hidden = true;
@@ -171,6 +158,7 @@
       .on(RoomEvent.TrackMuted, renderAll)
       .on(RoomEvent.TrackUnmuted, renderAll)
       .on(RoomEvent.LocalTrackPublished, renderAll)
+      .on(RoomEvent.DataReceived, (payload, participant, kind, topic) => window.Identify.onData(payload, participant, topic))
       .on(RoomEvent.ActiveSpeakersChanged, (speakers) => {
         const ids = new Set(speakers.map((s) => s.identity));
         for (const [id, tile] of tiles) tile.classList.toggle('speaking', ids.has(id));
@@ -188,6 +176,8 @@
     tile.className = 'tile';
     tile.innerHTML = '<video autoplay playsinline></video><div class="no-video" hidden>Camera off</div><div class="overlay-stats"></div><div class="label"></div>';
     tile.querySelector('video').muted = participant.isLocal;
+    tile.dataset.identity = participant.identity;
+    tile.dataset.local = participant.isLocal ? '1' : '';
     tile.addEventListener('click', () => {
       const wasFocused = tile.classList.contains('focused');
       for (const t of tiles.values()) t.classList.remove('focused');
@@ -315,21 +305,14 @@
   }
 
   // ---------------- toolbar ----------------
-  $('mic-btn').addEventListener('click', async (e) => {
-    if (!room) return;
-    const enabled = room.localParticipant.isMicrophoneEnabled;
-    await room.localParticipant.setMicrophoneEnabled(!enabled);
-    e.target.textContent = enabled ? 'Unmute' : 'Mute';
-    e.target.classList.toggle('off', enabled);
-  });
-
   $('cam-btn').addEventListener('click', async (e) => {
+    const btn = e.currentTarget;
     const pub = room?.localParticipant.getTrackPublication(Track.Source.Camera);
     if (!pub?.track) return;
     if (pub.isMuted) await pub.track.unmute();
     else await pub.track.mute();
-    e.target.textContent = pub.isMuted ? 'Camera on' : 'Camera off';
-    e.target.classList.toggle('off', pub.isMuted);
+    btn.classList.toggle('off', pub.isMuted);
+    btn.title = pub.isMuted ? 'Turn your camera on' : 'Turn your camera off';
     renderAll();
   });
 
@@ -346,7 +329,6 @@
     room = null;
     if (!fromServer) await r?.disconnect();
     previewVideo?.stop();
-    previewAudio?.stop();
     location.reload();
   }
 

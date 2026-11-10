@@ -119,3 +119,20 @@ function trimCard(card) {
     scryfallUrl: card.scryfall_uri || '',
   };
 }
+
+// Every distinct artwork of a card (newest first), for card recognition: a player's copy may be any
+// printing. Each face of a double-faced card is its own artwork. [{ key, small, normal }]
+export async function artworks(name, max = 16) {
+  const q = `!"${String(name).replace(/"/g, '')}" unique:art`;
+  const { status, body } = await scryfallGet(`/cards/search?q=${encodeURIComponent(q)}&order=released&dir=desc&include_extras=false`);
+  if (status !== 200) return [];
+  const out = [];
+  for (const card of body.data || []) {
+    const faces = card.image_uris ? [card.image_uris] : (card.card_faces || []).map((f) => f.image_uris).filter(Boolean);
+    faces.forEach((img, i) => {
+      if (img.normal) out.push({ key: `${card.id}/${i}`, small: img.small || img.normal, normal: img.normal });
+    });
+    if (out.length >= max) break;
+  }
+  return out.slice(0, max);
+}

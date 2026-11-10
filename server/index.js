@@ -15,13 +15,18 @@ import {
   applyAction, joinGame, pruneDrawings, rebroadcast, roomsWithDrawings, setDeck, subscribe,
 } from './game.js';
 import { autocomplete, namedCard } from './scryfall.js';
-import { getDeck, loadDeck, removeDeck } from './decks.js';
+import { allDeckCards, getDeck, loadDeck, removeDeck, roomDecks } from './decks.js';
+import { identify, indexCards, modelsAvailable } from './recognize.js';
 
 function loadedDeckResult(invite, summary, commanders) {
   setDeck(invite.room, invite.name, summary, commanders);
   const deck = getDeck(invite.room, invite.name);
+  if (deck) indexCards(deck.cards).catch((err) => console.warn('Card index failed:', err.message));
   return { summary, commanders, notFound: deck?.notFound || [] };
 }
+
+// Build card-recognition reference vectors for saved decks in the background.
+setTimeout(() => indexCards(allDeckCards()).catch((err) => console.warn('Card index failed:', err.message)), 2000);
 
 // Drop faded drawings every few seconds so late joiners don't see stale arrows.
 setInterval(() => {
@@ -105,6 +110,22 @@ function readBody(req, limit = 10_000) {
       }
     });
     req.on('end', () => resolve(body));
+    req.on('error', reject);
+  });
+}
+
+function readBinary(req, limit) {
+  return new Promise((resolve, reject) => {
+    const chunks = [];
+    let size = 0;
+    req.on('data', (chunk) => {
+      size += chunk.length;
+      if (size > limit) {
+        reject(new Error('Body too large'));
+        req.destroy();
+      } else chunks.push(chunk);
+    });
+    req.on('end', () => resolve(Buffer.concat(chunks)));
     req.on('error', reject);
   });
 }
@@ -252,6 +273,49 @@ async function handle(req, res) {
     return deck ? send(res, 200, deck) : send(res, 404, { error: 'No deck loaded' });
   }
 
+  // Card recognition. Body: JPEG of the area around the click. Query: code, player (whose video),
+  // x/y (click position inside the image, 0-1). Matches that player's deck first, then everyone's.
+  if (req.method === 'POST' && p === '/api/identify') {
+    const invite = findInvite(url.searchParams.get('code'));
+    if (!invite) return send(res, 403, { error: 'Invalid invite' });
+    if (!modelsAvailable()) return send(res, 503, { error: 'Card recognition is not installed on this server.' });
+    let image;
+    try {
+      image = await readBinary(req, 3_000_000);
+    } catch {
+      return send(res, 413, { error: 'Image too large' });
+    }
+    const player = url.searchParams.get('player') || '';
+    const clamp = (v) => Math.max(0, Math.min(1, Number(v) || 0.5));
+    const decks = roomDecks(invite.room);
+    if (decks.length === 0) return send(res, 200, { found: false, reason: 'nodecks' });
+    // The player's own deck goes first so their cards win ties.
+    decks.sort((a, b) => (b.owner === player) - (a.owner === player));
+    const candidates = decks.flatMap((d) => d.cards.map((card) => ({ card, owner: d.owner })));
+    try {
+      const result = await identify(image, { x: clamp(url.searchParams.get('x')), y: clamp(url.searchParams.get('y')) }, candidates);
+      if (result.found) {
+        result.matches = result.matches.map(({ card, owner, score }) => ({
+          owner,
+          score: Math.round(score * 1000) / 1000,
+          card: {
+            type: 'card', name: card.name, scryfallId: card.scryfallId, typeLine: card.typeLine,
+            image: card.image, imageLarge: card.imageLarge, power: card.power ?? '', toughness: card.toughness ?? '',
+          },
+        }));
+        const [first, second] = result.matches;
+        result.confident = !!first && first.score >= 0.3 && first.score - (second?.score || 0) >= 0.07;
+      }
+      const top = result.matches?.[0];
+      const said = !result.found ? 'no card found' : !top ? 'no deck match' : `${top.card.name} ${top.score}${result.confident ? '' : ' (unsure)'}`;
+      console.log(`Identify by ${invite.name} on ${player || '?'}: ${said} in ${result.ms} ms`);
+      return send(res, 200, result);
+    } catch (err) {
+      console.error('Recognition error', err);
+      return send(res, 400, { error: 'Could not read that image.' });
+    }
+  }
+
   // Browsers report their video stats here so the host can check quality from the log.
   if (req.method === 'POST' && p === '/api/stats') {
     let body;
@@ -297,7 +361,7 @@ async function handle(req, res) {
     return send(res, 200, {
       token: await token.toJwt(),
       // Same host the page was loaded from; /rtc is proxied to LiveKit.
-      serverUrl: `wss://${req.headers.host}`,
+      serverUrl: `${req.socket.encrypted ? "wss" : "ws"}://${req.headers.host}`,
       name: invite.name,
       room: invite.room,
       identity,
@@ -318,6 +382,17 @@ const server = https.createServer({
   });
 });
 server.on('upgrade', proxyUpgrade);
+
+// Optional plain-HTTP listener on this machine only (MTG_DEV_HTTP=<port>), for previewing the UI in
+// browsers that refuse the self-signed certificate. Never reachable from other machines.
+if (process.env.MTG_DEV_HTTP) {
+  const dev = http.createServer((req, res) => handle(req, res).catch((err) => {
+    console.error(err);
+    if (!res.headersSent) send(res, 500, { error: 'Server error' });
+  }));
+  dev.on('upgrade', proxyUpgrade);
+  dev.listen(Number(process.env.MTG_DEV_HTTP), '127.0.0.1', () => console.log(`Local preview: http://127.0.0.1:${process.env.MTG_DEV_HTTP}`));
+}
 server.listen(config.httpsPort, '0.0.0.0', () => {
   const active = loadInvites().filter((i) => !i.revoked);
   console.log(`\nMTG Table running at ${config.publicUrl}`);

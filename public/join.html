@@ -7,9 +7,31 @@
   <link rel="stylesheet" href="/static/style.css">
 </head>
 <body>
+  <svg width="0" height="0" style="position:absolute" aria-hidden="true">
+    <defs>
+      <symbol id="i-logo" viewBox="0 0 24 24"><rect x="4" y="3" width="11" height="15" rx="2"/><path d="M9 6h9a2 2 0 0 1 2 2v11a2 2 0 0 1-2 2h-7a2 2 0 0 1-2-2"/></symbol>
+      <symbol id="i-pointer" viewBox="0 0 24 24"><path d="M5 3l14 7-6 2-2 6z"/></symbol>
+      <symbol id="i-scan" viewBox="0 0 24 24"><path d="M4 8V6a2 2 0 0 1 2-2h2M16 4h2a2 2 0 0 1 2 2v2M20 16v2a2 2 0 0 1-2 2h-2M8 20H6a2 2 0 0 1-2-2v-2"/><rect x="9" y="7.5" width="6" height="9" rx="1"/></symbol>
+      <symbol id="i-sticker" viewBox="0 0 24 24"><path d="M15 3H6a3 3 0 0 0-3 3v12a3 3 0 0 0 3 3h7l8-8V6a3 3 0 0 0-3-3z"/><path d="M13 21v-5a3 3 0 0 1 3-3h5"/></symbol>
+      <symbol id="i-pen" viewBox="0 0 24 24"><path d="M16.5 3.5a2.1 2.1 0 0 1 3 3L7 19l-4 1 1-4z"/></symbol>
+      <symbol id="i-arrow" viewBox="0 0 24 24"><path d="M5 19L19 5M9 5h10v10"/></symbol>
+      <symbol id="i-eraser" viewBox="0 0 24 24"><path d="M7 21h13M5.5 15.5l9-9a2 2 0 0 1 2.8 0l2.2 2.2a2 2 0 0 1 0 2.8L12 19H8z"/><path d="M10 10l5 5"/></symbol>
+      <symbol id="i-search" viewBox="0 0 24 24"><circle cx="11" cy="11" r="7"/><path d="M20 20l-3.5-3.5"/></symbol>
+      <symbol id="i-crown" viewBox="0 0 24 24"><path d="M3 7l4.5 4L12 4l4.5 7L21 7l-2 12H5z"/></symbol>
+      <symbol id="i-layers" viewBox="0 0 24 24"><path d="M12 3l9 5-9 5-9-5z"/><path d="M3 13l9 5 9-5"/></symbol>
+      <symbol id="i-video" viewBox="0 0 24 24"><rect x="3" y="6" width="13" height="12" rx="2"/><path d="M16 10l5-3v10l-5-3"/></symbol>
+      <symbol id="i-video-off" viewBox="0 0 24 24"><path d="M3 3l18 18M8 6h6a2 2 0 0 1 2 2v4l5-3v8M16 16v0a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V8a2 2 0 0 1 1.5-1.9"/></symbol>
+      <symbol id="i-sliders" viewBox="0 0 24 24"><path d="M4 6h10M18 6h2M4 12h4M12 12h8M4 18h12M20 18h0"/><circle cx="16" cy="6" r="2"/><circle cx="10" cy="12" r="2"/><circle cx="18" cy="18" r="2"/></symbol>
+      <symbol id="i-eye" viewBox="0 0 24 24"><path d="M2 12s3.5-7 10-7 10 7 10 7-3.5 7-10 7S2 12 2 12z"/><circle cx="12" cy="12" r="3"/></symbol>
+      <symbol id="i-leave" viewBox="0 0 24 24"><path d="M15 4h3a2 2 0 0 1 2 2v12a2 2 0 0 1-2 2h-3M10 17l-5-5 5-5M5 12h11"/></symbol>
+      <symbol id="i-x" viewBox="0 0 24 24"><path d="M6 6l12 12M18 6L6 18"/></symbol>
+      <symbol id="i-shuffle" viewBox="0 0 24 24"><path d="M16 4h4v4M4 20L20 4M20 16v4h-4M15 15l5 5M4 4l5 5"/></symbol>
+      <symbol id="i-sun" viewBox="0 0 24 24"><circle cx="12" cy="12" r="4"/><path d="M12 2v2M12 20v2M4.9 4.9l1.4 1.4M17.7 17.7l1.4 1.4M2 12h2M20 12h2M4.9 19.1l1.4-1.4M17.7 6.3l1.4-1.4"/></symbol>
+    </defs>
+  </svg>
   <!-- Lobby: pick camera and quality, check the preview, then join -->
   <main id="lobby" class="center-card wide">
-    <h1>MTG Table</h1>
+    <h1><svg class="ic brand-mark"><use href="#i-logo"/></svg>MTG Table</h1>
     <p id="greeting" class="muted">Checking your invite…</p>
 
     <div id="lobby-body" hidden>
@@ -21,9 +43,6 @@
       <div class="form-grid">
         <label>Camera
           <select id="camera-select"></select>
-        </label>
-        <label>Microphone
-          <select id="mic-select"></select>
         </label>
         <label>Video quality
           <select id="quality-select">
@@ -42,105 +61,138 @@
 
   <!-- Room -->
   <div id="room" hidden>
-    <header class="toolbar">
-      <span id="room-title" class="room-title"></span>
-      <div class="toolbar-buttons">
-        <button id="pass-btn" title="End your turn and pass to the next player">Pass turn</button>
-        <button id="game-btn" title="Turn order, monarch, game mode, new game and log">Game</button>
-        <button id="deck-btn" title="Load your deck list and view other players' decks">Decks</button>
-        <button id="mic-btn" title="Mute or unmute your microphone">Mute</button>
-        <button id="cam-btn" title="Turn your camera on or off">Camera off</button>
-        <button id="cam-settings-btn" title="Brightness, contrast, sharpening and camera focus for your video">Picture</button>
-        <button id="stats-btn" title="Show or hide video stats">Hide stats</button>
-        <button id="leave-btn" class="danger">Leave</button>
+    <header class="topbar">
+      <div class="brand">
+        <svg class="ic brand-mark"><use href="#i-logo"/></svg>
+        <span id="room-title" class="room-title"></span>
+      </div>
+
+      <nav class="seg" aria-label="Table tools">
+        <button data-tool="select" class="on" title="Select: click videos to enlarge them; click stickers to edit"><svg class="ic"><use href="#i-pointer"/></svg><span class="lbl">Select</span></button>
+        <button data-tool="identify" title="Identify: click a card on any video to find out what it is"><svg class="ic"><use href="#i-scan"/></svg><span class="lbl">Identify</span></button>
+        <button data-tool="sticker" title="Sticker: click a spot on a video to add P/T, counters or a card"><svg class="ic"><use href="#i-sticker"/></svg><span class="lbl">Sticker</span></button>
+        <button data-tool="pen" title="Pen: draw freehand on a video"><svg class="ic"><use href="#i-pen"/></svg><span class="lbl">Pen</span></button>
+        <button data-tool="arrow" title="Arrow: drag to point from one thing to another"><svg class="ic"><use href="#i-arrow"/></svg><span class="lbl">Arrow</span></button>
+        <button data-tool="eraser" title="Eraser: click or drag over drawings to remove them"><svg class="ic"><use href="#i-eraser"/></svg><span class="lbl">Eraser</span></button>
+      </nav>
+
+      <div class="actions">
+        <button id="find-card-btn" class="icon-btn" title="Find a card on Scryfall"><svg class="ic"><use href="#i-search"/></svg></button>
+        <button id="pass-btn" class="pass-btn" title="End your turn and pass to the next player">Pass turn</button>
+        <span class="divider"></span>
+        <button id="game-btn" class="ghost" title="Turn order, monarch, game mode, new game and log"><svg class="ic"><use href="#i-crown"/></svg><span class="lbl">Game</span></button>
+        <button id="deck-btn" class="ghost" title="Load your deck list and view other players' decks"><svg class="ic"><use href="#i-layers"/></svg><span class="lbl">Decks</span></button>
+        <span class="divider"></span>
+        <button id="cam-btn" class="icon-btn toggle" title="Turn your camera on or off"><svg class="ic when-on"><use href="#i-video"/></svg><svg class="ic when-off"><use href="#i-video-off"/></svg></button>
+        <button id="cam-settings-btn" class="icon-btn" title="Your camera picture: brightness, contrast, sharpening, focus"><svg class="ic"><use href="#i-sliders"/></svg></button>
+        <div class="menu">
+          <button class="icon-btn" data-menu-btn aria-haspopup="true" title="View options (your screen only)"><svg class="ic"><use href="#i-eye"/></svg></button>
+          <div class="menu-pop" role="menu">
+            <p class="menu-title">On your screen</p>
+            <label class="menu-range" title="Sticker size on your screen only">
+              <span>Sticker size</span>
+              <input id="sticker-size" type="range" min="50" max="200" step="10" value="100">
+              <output id="sticker-size-out">100%</output>
+            </label>
+            <button id="names-btn" class="menu-item check" title="Show or hide card names and labels on stickers">Names on</button>
+            <button id="hide-marks-btn" class="menu-item" title="Hide stickers and drawings on your screen only">Hide marks</button>
+            <button id="stats-btn" class="menu-item" title="Show or hide video quality numbers on each video">Hide stats</button>
+            <div class="menu-sep"></div>
+            <button id="leave-btn" class="menu-item danger-text"><svg class="ic"><use href="#i-leave"/></svg>Leave table</button>
+          </div>
+        </div>
       </div>
     </header>
-    <nav class="tools" aria-label="Table tools">
-      <div class="tool-group">
-        <button data-tool="select" class="on" title="Click videos to enlarge them; click stickers to edit">Select</button>
-        <button data-tool="sticker" title="Click a spot on a video to add a sticker (P/T, counters, cards)">Sticker</button>
-        <button data-tool="pen" title="Draw freehand on a video">Pen</button>
-        <button data-tool="arrow" title="Drag to draw an arrow">Arrow</button>
-        <button data-tool="eraser" title="Click or drag over drawings and arrows to erase them">Eraser</button>
-        <span class="pen-style">
-          <span class="swatches" id="swatches"></span>
-          <input id="draw-color" type="color" title="Pick any drawing color">
-          <select id="draw-size" title="Line thickness">
-            <option value="0.5">Thin</option>
-            <option value="1" selected>Medium</option>
-            <option value="2">Thick</option>
-            <option value="3.5">Marker</option>
-          </select>
-        </span>
-      </div>
-      <div class="tool-group">
-        <button id="find-card-btn" title="Look up a card on Scryfall and place it as a sticker">Find card</button>
-        <button id="keep-btn" title="Choose whether new drawings fade after 20 seconds">Drawings fade</button>
-        <button id="clear-mine-btn" title="Erase everything you've drawn">Clear my drawings</button>
-        <label class="size-ctl" title="Sticker size on your screen only">Sticker size
-          <input id="sticker-size" type="range" min="50" max="200" step="10" value="100">
-          <output id="sticker-size-out">100%</output>
-        </label>
-        <button id="names-btn" title="Show or hide card names and labels on stickers (your screen only)">Names on</button>
-        <button id="hide-marks-btn" title="Hide stickers and drawings on your screen only">Hide marks</button>
-      </div>
-    </nav>
-    <div id="place-banner" class="place-banner" hidden>
+
+    <!-- Drawing options: shown while the pen, arrow or eraser is picked -->
+    <div class="subbar draw-bar" aria-label="Drawing options">
+      <span class="swatches" id="swatches"></span>
+      <label class="color-pick" title="Pick any drawing color"><input id="draw-color" type="color"></label>
+      <span class="divider"></span>
+      <select id="draw-size" title="Line thickness">
+        <option value="0.5">Thin</option>
+        <option value="1" selected>Medium</option>
+        <option value="2">Thick</option>
+        <option value="3.5">Marker</option>
+      </select>
+      <button id="keep-btn" class="chip" title="Choose whether new drawings fade after 20 seconds">Drawings fade</button>
+      <button id="clear-mine-btn" class="chip" title="Erase everything you've drawn">Clear mine</button>
+    </div>
+    <div id="place-banner" class="subbar place-banner" hidden>
       <span id="place-text"></span>
-      <button id="place-cancel">Cancel</button>
+      <button id="place-cancel" class="chip">Cancel</button>
     </div>
 
     <div class="room-body">
       <div class="room-main">
-        <p class="hint">Click a player's video to enlarge it. Double-click for full screen. Life, stickers and drawings are shared with everyone.</p>
         <section id="grid" class="grid"></section>
       </div>
 
       <aside id="game-panel" class="game-panel" hidden>
         <div class="panel-head">
-          <h2>Game</h2>
-          <button id="panel-close" title="Close">✕</button>
-        </div>
-        <p id="round-info" class="muted"></p>
-
-        <h3>Turn order</h3>
-        <ol id="order-list" class="order-list"></ol>
-        <button id="shuffle-btn">Randomize turn order</button>
-
-        <h3>New game</h3>
-        <div class="new-game">
-          <select id="game-mode" title="Game mode">
-            <option value="commander">Commander (40 life, commander damage)</option>
-            <option value="brawl">Brawl (25 life 1v1, 30 multiplayer)</option>
-            <option value="standard">Standard (20 life)</option>
-          </select>
-          <select id="start-life" title="Starting life (filled in from the mode)">
-            <option value="40">40 life</option>
-            <option value="30">30 life</option>
-            <option value="25">25 life</option>
-            <option value="20">20 life</option>
-          </select>
-          <button id="new-game-btn">Start new game</button>
+          <div>
+            <h2>Game</h2>
+            <p id="round-info" class="panel-sub"></p>
+          </div>
+          <button id="panel-close" class="icon-btn" title="Close"><svg class="ic"><use href="#i-x"/></svg></button>
         </div>
 
-        <h3>Table marks</h3>
-        <div class="new-game">
-          <button id="clear-stickers-btn">Clear all stickers</button>
-          <button id="clear-drawings-btn">Clear all drawings</button>
-        </div>
+        <section class="panel-sec">
+          <h3>Turn order</h3>
+          <ol id="order-list" class="order-list"></ol>
+          <button id="shuffle-btn" class="block"><svg class="ic"><use href="#i-shuffle"/></svg>Randomize turn order</button>
+        </section>
 
-        <h3>Log</h3>
-        <ul id="game-log" class="game-log"></ul>
+        <section class="panel-sec">
+          <h3>New game</h3>
+          <div class="field-stack">
+            <select id="game-mode" title="Game mode">
+              <option value="commander">Commander</option>
+              <option value="brawl">Brawl</option>
+              <option value="standard">Standard</option>
+            </select>
+            <div class="field-row">
+              <select id="start-life" title="Starting life (filled in from the mode)">
+                <option value="40">40 life</option>
+                <option value="30">30 life</option>
+                <option value="25">25 life</option>
+                <option value="20">20 life</option>
+              </select>
+              <button id="new-game-btn" class="primary">Start new game</button>
+            </div>
+          </div>
+        </section>
+
+        <section class="panel-sec">
+          <h3>Table marks</h3>
+          <div class="field-row">
+            <button id="clear-stickers-btn">Clear stickers</button>
+            <button id="clear-drawings-btn">Clear drawings</button>
+          </div>
+        </section>
+
+        <section class="panel-sec">
+          <h3>Log</h3>
+          <ul id="game-log" class="game-log"></ul>
+        </section>
       </aside>
 
       <aside id="deck-panel" class="game-panel" hidden>
         <div class="panel-head">
           <h2>Decks</h2>
-          <button id="deck-close" title="Close">✕</button>
+          <button id="deck-close" class="icon-btn" title="Close"><svg class="ic"><use href="#i-x"/></svg></button>
         </div>
-        <div id="deck-tabs" class="deck-tabs"></div>
-        <input id="deck-search" class="deck-search" type="search" placeholder="Search this deck (name or type)…" autocomplete="off">
-        <div id="deck-body"></div>
+        <section class="panel-sec">
+          <h3>Players</h3>
+          <div id="deck-tabs" class="deck-tabs"></div>
+          <div class="search-field">
+            <svg class="ic"><use href="#i-search"/></svg>
+            <input id="deck-search" class="deck-search" type="search" placeholder="Search this deck" autocomplete="off">
+          </div>
+        </section>
+        <section class="panel-sec">
+          <div id="deck-body"></div>
+        </section>
       </aside>
     </div>
   </div>
@@ -182,13 +234,24 @@
     </div>
   </dialog>
 
+  <!-- Card recognition result -->
+  <dialog id="identify-dialog" class="sticker-dialog">
+    <div class="dialog-head"><h2>What card is that?</h2></div>
+    <div id="identify-body" class="identify-body"></div>
+    <div class="dialog-foot">
+      <button id="identify-close" class="primary">Close</button>
+    </div>
+  </dialog>
+
   <!-- Large card image when hovering a card sticker -->
   <div id="card-preview" class="card-preview" hidden><img alt=""></div>
 
   <script src="/vendor/livekit-client.js"></script>
+  <script src="/static/ui.js"></script>
   <script src="/static/picture.js"></script>
   <script src="/static/adjust.js"></script>
   <script src="/static/marks.js"></script>
+  <script src="/static/identify.js"></script>
   <script src="/static/decks.js"></script>
   <script src="/static/game.js"></script>
   <script src="/static/app.js"></script>

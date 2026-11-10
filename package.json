@@ -12,7 +12,9 @@
   "dependencies": {
     "livekit-client": "^2.23.0",
     "livekit-server-sdk": "^2.19.2",
-    "selfsigned": "^5.5.0"
+    "onnxruntime-node": "^1.31.1",
+    "selfsigned": "^5.5.0",
+    "sharp": "^0.35.5"
   },
   "private": true,
   "type": "module"

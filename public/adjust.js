@@ -59,7 +59,7 @@ window.Adjust = (() => {
       const btn = document.createElement('button');
       btn.className = 'adjust-btn';
       btn.title = 'Adjust how this video looks on your screen';
-      btn.textContent = '☀';
+      btn.innerHTML = '<svg class="ic"><use href="#i-sun"/></svg>';
       btn.title = isLocal ? 'Adjust your camera picture (everyone sees it)' : 'Adjust how this video looks on your screen';
       btn.addEventListener('click', (e) => {
         e.stopPropagation();

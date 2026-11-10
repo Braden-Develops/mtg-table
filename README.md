@@ -74,3 +74,9 @@ being reduced if it is) and what you receive from each player. Hide them with th
 ## Data folder
 
 `data/` holds secrets (API secret, certificate key, invite codes). It's in `.gitignore`. Never share it.
+
+## Previewing the UI on this computer
+
+Some browsers (and embedded previews) refuse the self-signed certificate. Start the server with
+`MTG_DEV_HTTP=8080 npm start` to also serve plain HTTP on `http://127.0.0.1:8080`. It only listens on
+this computer, never on the network.

@@ -20,6 +20,7 @@ window.Game = (() => {
     code = inviteCode;
     me = myName;
     window.Marks.init({ code, me, act });
+    window.Identify.init({ code, me });
     window.Decks.init({ code, me, act });
     connect();
     wirePanel();

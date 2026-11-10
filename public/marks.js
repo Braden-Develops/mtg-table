@@ -213,6 +213,10 @@ window.Marks = (() => {
         placeSticker(entry.name, pt);
         return;
       }
+      if (tool === 'identify') {
+        window.Identify.clickAt(tile, entry.name, pt);
+        return;
+      }
       layer.setPointerCapture(ev.pointerId);
       if (tool === 'eraser') {
         entry.erasing = true;
@@ -664,7 +668,7 @@ window.Marks = (() => {
     $('sticker-done').addEventListener('click', closeEditor);
     $('sticker-delete').addEventListener('click', () => {
       const s = currentSticker();
-      if (s && confirm('Delete this whole sticker?')) {
+      if (s) {
         act({ type: 'stickerRemove', id: s.id });
         closeEditor();
       }
@@ -819,5 +823,14 @@ window.Marks = (() => {
     renderEditor();
   }
 
-  return { init, attachTile, detachTile, update, showCard, showPreview, hidePreview, tileAt, dropCard };
+  // Put a card sticker at a spot on a player's video (from the Identify tool).
+  function placeCard(tileName, x, y, card) {
+    act({ type: 'stickerAdd', id: newId(), target: tileName, x, y, items: [{ ...card, type: 'card' }] });
+  }
+
+  function openLookup() {
+    openEditor({ mode: 'lookup' });
+  }
+
+  return { init, attachTile, detachTile, update, showCard, showPreview, hidePreview, tileAt, dropCard, placeCard, openLookup };
 })();

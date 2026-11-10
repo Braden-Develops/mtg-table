@@ -108,3 +108,13 @@ export function removeDeck(room, name) {
     save();
   }
 }
+
+// Every deck loaded at a table: [{ owner, cards }].
+export function roomDecks(room) {
+  return Object.values(decks[room] || {});
+}
+
+// All cards in all saved decks (to build the recognition index at startup).
+export function allDeckCards() {
+  return Object.values(decks).flatMap((room) => Object.values(room).flatMap((d) => d.cards));
+}
