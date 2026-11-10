@@ -17,6 +17,9 @@ import {
 import { autocomplete, namedCard } from './scryfall.js';
 import { allDeckCards, getDeck, loadDeck, removeDeck, roomDecks } from './decks.js';
 import { identify, indexCards, modelsAvailable } from './recognize.js';
+import {
+  clientIp, findInvite, handleHost, isHttps, overLimit, peek,
+} from './host.js';
 
 function loadedDeckResult(invite, summary, commanders) {
   setDeck(invite.room, invite.name, summary, commanders);
@@ -34,7 +37,7 @@ setInterval(() => {
 }, 5000);
 import {
   CERT_FILE, KEY_FILE, LIVEKIT_YAML, ROOT,
-  inviteUrl, loadConfig, loadInvites,
+  inviteUrl, loadConfig,
 } from '../scripts/lib.js';
 
 const config = loadConfig();
@@ -82,9 +85,18 @@ if (!process.argv.includes('--no-livekit')) {
 }
 
 // ---------- helpers ----------
+// Sent with every response. no-referrer matters: invite codes are in page URLs, and card images
+// load from Scryfall.
+const SECURITY_HEADERS = {
+  'Referrer-Policy': 'no-referrer',
+  'X-Content-Type-Options': 'nosniff',
+  'X-Frame-Options': 'DENY',
+  'Permissions-Policy': 'camera=(self), microphone=(), geolocation=()',
+};
+
 function send(res, status, body, type = 'application/json') {
   const payload = typeof body === 'string' ? body : JSON.stringify(body);
-  res.writeHead(status, { 'Content-Type': type, 'Cache-Control': 'no-store' });
+  res.writeHead(status, { ...SECURITY_HEADERS, 'Content-Type': type, 'Cache-Control': 'no-store' });
   res.end(payload);
 }
 
@@ -92,6 +104,7 @@ function sendFile(res, file) {
   fs.readFile(file, (err, data) => {
     if (err) return send(res, 404, 'Not found', 'text/plain');
     res.writeHead(200, {
+      ...SECURITY_HEADERS,
       'Content-Type': MIME[path.extname(file)] || 'application/octet-stream',
       'Cache-Control': 'no-cache',
     });
@@ -128,12 +141,6 @@ function readBinary(req, limit) {
     req.on('end', () => resolve(Buffer.concat(chunks)));
     req.on('error', reject);
   });
-}
-
-function findInvite(code) {
-  if (typeof code !== 'string' || code.length < 10) return null;
-  const invite = loadInvites().find((i) => i.code === code);
-  return invite && !invite.revoked ? invite : null;
 }
 
 function isLivekitPath(url) {
@@ -182,9 +189,36 @@ async function handle(req, res) {
   const p = url.pathname;
 
   if (isLivekitPath(p)) return proxyHttp(req, res);
+  const ip = clientIp(req);
+
+  // Every player request carries an invite code. Unknown codes count against the visitor's
+  // address, and each invite gets a per-minute budget for each kind of request.
+  const guest = (code, bucket, perMinute, status = 403, error = 'Invalid invite') => {
+    if (peek(`bad:${ip}`) >= 30) {
+      send(res, 429, { error: 'Too many invalid invite links from your address. Try again later.' });
+      return null;
+    }
+    const invite = findInvite(code);
+    if (!invite) {
+      overLimit(`bad:${ip}`, 30, 10 * 60_000);
+      send(res, status, { error });
+      return null;
+    }
+    if (overLimit(`${bucket}:${invite.code}`, perMinute, 60_000)) {
+      send(res, 429, { error: 'Too many requests. Wait a moment and try again.' });
+      return null;
+    }
+    return invite;
+  };
+  const BAD_LINK = 'This invite link is not valid. Ask the host for a new one.';
+
+  if (await handleHost(config, req, res, p, { send, readBody, inviteUrl })) return;
 
   if (req.method === 'GET' && (p === '/' || p === '/index.html')) {
     return sendFile(res, path.join(PUBLIC_DIR, 'index.html'));
+  }
+  if (req.method === 'GET' && p === '/host') {
+    return sendFile(res, path.join(PUBLIC_DIR, 'host.html'));
   }
   if (req.method === 'GET' && /^\/join\/[\w-]+$/.test(p)) {
     return sendFile(res, path.join(PUBLIC_DIR, 'join.html'));
@@ -204,15 +238,15 @@ async function handle(req, res) {
   // Who is this invite for? (lets the page greet the player before joining)
   const inviteMatch = p.match(/^\/api\/invite\/([\w-]+)$/);
   if (req.method === 'GET' && inviteMatch) {
-    const invite = findInvite(inviteMatch[1]);
-    if (!invite) return send(res, 404, { error: 'This invite link is not valid. Ask the host for a new one.' });
+    const invite = guest(inviteMatch[1], 'invite', 60, 404, BAD_LINK);
+    if (!invite) return;
     return send(res, 200, { name: invite.name, room: invite.room });
   }
 
   // Live game state (life, counters, turns) as Server-Sent Events. Opening it seats the player.
   if (req.method === 'GET' && p === '/api/game/stream') {
-    const invite = findInvite(url.searchParams.get('code'));
-    if (!invite) return send(res, 403, { error: 'Invalid invite' });
+    const invite = guest(url.searchParams.get('code'), 'stream', 30);
+    if (!invite) return;
     joinGame(invite.room, invite.name);
     return subscribe(invite.room, res);
   }
@@ -224,15 +258,15 @@ async function handle(req, res) {
     } catch {
       return send(res, 400, { error: 'Bad request' });
     }
-    const invite = findInvite(body.code);
-    if (!invite) return send(res, 403, { error: 'Invalid invite' });
+    const invite = guest(body.code, 'action', 600);
+    if (!invite) return;
     const error = applyAction(invite.room, invite.name, body.action || {});
     return error ? send(res, 400, { error }) : send(res, 204, '');
   }
 
   // Scryfall card search (proxied so we can cache and rate-limit). Invite required.
   if (req.method === 'GET' && (p === '/api/scryfall/autocomplete' || p === '/api/scryfall/card')) {
-    if (!findInvite(url.searchParams.get('code'))) return send(res, 403, { error: 'Invalid invite' });
+    if (!guest(url.searchParams.get('code'), 'scryfall', 120)) return;
     try {
       if (p.endsWith('autocomplete')) return send(res, 200, { names: await autocomplete(url.searchParams.get('q')) });
       const card = await namedCard(url.searchParams.get('name'));
@@ -251,8 +285,8 @@ async function handle(req, res) {
     } catch {
       return send(res, 400, { error: 'Deck list is too long or not readable.' });
     }
-    const invite = findInvite(body.code);
-    if (!invite) return send(res, 403, { error: 'Invalid invite' });
+    const invite = guest(body.code, 'deck', 10);
+    if (!invite) return;
     if (p.endsWith('/remove')) {
       removeDeck(invite.room, invite.name);
       setDeck(invite.room, invite.name, null, null);
@@ -267,8 +301,8 @@ async function handle(req, res) {
     }
   }
   if (req.method === 'GET' && p === '/api/deck') {
-    const invite = findInvite(url.searchParams.get('code'));
-    if (!invite) return send(res, 403, { error: 'Invalid invite' });
+    const invite = guest(url.searchParams.get('code'), 'deckview', 120);
+    if (!invite) return;
     const deck = getDeck(invite.room, url.searchParams.get('player') || invite.name);
     return deck ? send(res, 200, deck) : send(res, 404, { error: 'No deck loaded' });
   }
@@ -276,8 +310,8 @@ async function handle(req, res) {
   // Card recognition. Body: JPEG of the area around the click. Query: code, player (whose video),
   // x/y (click position inside the image, 0-1). Matches that player's deck first, then everyone's.
   if (req.method === 'POST' && p === '/api/identify') {
-    const invite = findInvite(url.searchParams.get('code'));
-    if (!invite) return send(res, 403, { error: 'Invalid invite' });
+    const invite = guest(url.searchParams.get('code'), 'identify', 20);
+    if (!invite) return;
     if (!modelsAvailable()) return send(res, 503, { error: 'Card recognition is not installed on this server.' });
     let image;
     try {
@@ -324,9 +358,9 @@ async function handle(req, res) {
     } catch {
       return send(res, 400, { error: 'Bad request' });
     }
-    const invite = findInvite(body.code);
-    if (!invite) return send(res, 403, { error: 'Invalid invite' });
-    const line = JSON.stringify({ t: new Date().toISOString(), name: invite.name, ...body.report }) + '\n';
+    const invite = guest(body.code, 'stats', 30);
+    if (!invite) return;
+    const line =JSON.stringify({ t: new Date().toISOString(), name: invite.name, ...body.report }) + '\n';
     fs.stat(STATS_LOG, (err, st) => {
       if (!err && st.size > 5_000_000) fs.renameSync(STATS_LOG, STATS_LOG + '.old');
       fs.appendFile(STATS_LOG, line, () => {});
@@ -341,8 +375,8 @@ async function handle(req, res) {
     } catch {
       return send(res, 400, { error: 'Bad request' });
     }
-    const invite = findInvite(body.code);
-    if (!invite) return send(res, 403, { error: 'This invite link is not valid. Ask the host for a new one.' });
+    const invite = guest(body.code, 'token', 20, 403, BAD_LINK);
+    if (!invite) return;
 
     // A random suffix lets the same person join from two devices (handy for testing).
     const identity = `${invite.name}-${crypto.randomBytes(3).toString('hex')}`;
@@ -361,7 +395,7 @@ async function handle(req, res) {
     return send(res, 200, {
       token: await token.toJwt(),
       // Same host the page was loaded from; /rtc is proxied to LiveKit.
-      serverUrl: `${req.socket.encrypted ? "wss" : "ws"}://${req.headers.host}`,
+      serverUrl: `${isHttps(req) ? 'wss' : 'ws'}://${req.headers.host}`,
       name: invite.name,
       room: invite.room,
       identity,
@@ -372,35 +406,33 @@ async function handle(req, res) {
 }
 
 // ---------- start ----------
-const server = https.createServer({
-  cert: fs.readFileSync(CERT_FILE),
-  key: fs.readFileSync(KEY_FILE),
-}, (req, res) => {
-  handle(req, res).catch((err) => {
-    console.error(err);
-    if (!res.headersSent) send(res, 500, { error: 'Server error' });
-  });
+const onRequest = (req, res) => handle(req, res).catch((err) => {
+  console.error(err);
+  if (!res.headersSent) send(res, 500, { error: 'Server error' });
 });
-server.on('upgrade', proxyUpgrade);
+const announce = () => {
+  console.log(`\nMTG Table running at ${config.publicUrl}`);
+  console.log(config.hostPassword
+    ? `Host page: ${config.publicUrl.replace(/\/$/, '')}/host`
+    : 'Host page is locked until you set a password: npm run host-password');
+  console.log('Press Ctrl+C to stop.\n');
+};
+
+if (config.behindProxy) {
+  // On a public server: Caddy (or another proxy) handles HTTPS and forwards to this port on localhost.
+  const server = http.createServer(onRequest);
+  server.on('upgrade', proxyUpgrade);
+  server.listen(config.httpPort, '127.0.0.1', announce);
+} else {
+  const server = https.createServer({ cert: fs.readFileSync(CERT_FILE), key: fs.readFileSync(KEY_FILE) }, onRequest);
+  server.on('upgrade', proxyUpgrade);
+  server.listen(config.httpsPort, '0.0.0.0', announce);
+}
 
 // Optional plain-HTTP listener on this machine only (MTG_DEV_HTTP=<port>), for previewing the UI in
 // browsers that refuse the self-signed certificate. Never reachable from other machines.
 if (process.env.MTG_DEV_HTTP) {
-  const dev = http.createServer((req, res) => handle(req, res).catch((err) => {
-    console.error(err);
-    if (!res.headersSent) send(res, 500, { error: 'Server error' });
-  }));
+  const dev = http.createServer(onRequest);
   dev.on('upgrade', proxyUpgrade);
   dev.listen(Number(process.env.MTG_DEV_HTTP), '127.0.0.1', () => console.log(`Local preview: http://127.0.0.1:${process.env.MTG_DEV_HTTP}`));
 }
-server.listen(config.httpsPort, '0.0.0.0', () => {
-  const active = loadInvites().filter((i) => !i.revoked);
-  console.log(`\nMTG Table running at ${config.publicUrl}`);
-  if (active.length === 0) {
-    console.log('No invites yet. Create one with: npm run invite -- <name>');
-  } else {
-    console.log('Active invites:');
-    for (const inv of active) console.log(`  ${inv.name.padEnd(16)} ${inviteUrl(config, inv.code)}`);
-  }
-  console.log('Press Ctrl+C to stop.\n');
-});

@@ -33,6 +33,33 @@ npm run invite -- --revoke Jake # turn Jake's link off
 npm start                       # run the table (Ctrl+C to stop)
 ```
 
+### Host page
+
+Run `npm run host-password` once (it prints a random password; or pass your own of 10+ characters),
+restart the server, then open `/host` on the site. From there you can:
+
+- make one invite link per player and table, working for 1 day, 1 week, 30 days or until revoked
+- see who is online at each table
+- revoke a link (anyone using it is disconnected straight away) or close a whole table
+
+Changing the password logs out every logged-in browser. Repeated wrong passwords from one address are
+blocked for 15 minutes, and so are addresses that try many invalid invite links.
+
+### Public server
+
+`npm run setup -- --domain mtg.example.com` switches to public-server mode: the app listens on
+127.0.0.1:8080 with plain HTTP and a proxy such as Caddy serves HTTPS for the domain. Each table
+allows up to 8 people (`maxPlayers` in `data/config.json`, then re-run setup).
+
+### Deploying
+
+A fresh Ubuntu server is set up once with `sudo bash deploy/install.sh <domain>` from a copy of this
+folder (with `models/`). After that, every push to `main` deploys automatically through GitHub Actions
+(`.github/workflows/deploy.yml`): the code is checked, uploaded over SSH with a deploy key that can only
+run `/usr/local/sbin/mtg-deploy`, and installed by `deploy/update.sh`, which restarts the app and puts
+the previous version back if it doesn't come up. Invites, decks, config and models on the server are
+never touched. Deploys can also be started by hand from the repository's Actions tab.
+
 Each device that opens the site shows a certificate warning the first time, because the certificate is
 self-signed. Choose "Advanced → Proceed". This is only for testing on your home network; a cloud
 server will use a real certificate.

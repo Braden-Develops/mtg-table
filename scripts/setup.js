@@ -2,6 +2,9 @@
 //   npm run setup                      -> uses this PC's first LAN address
 //   npm run setup -- --host 192.168.0.5 -> pick the address invite links should use
 //   npm run setup -- --new-cert         -> regenerate the certificate
+//   npm run setup -- --domain mtg.example.com
+//        -> public server mode: a proxy such as Caddy serves HTTPS for that domain and forwards
+//           to this app on 127.0.0.1:8080 (no self-signed certificate)
 import crypto from 'node:crypto';
 import fs from 'node:fs';
 import selfsigned from 'selfsigned';
@@ -29,8 +32,18 @@ const config = {
   rtcTcpPort: existing.rtcTcpPort || 7881,
   rtcUdpPort: existing.rtcUdpPort || 7882,
   defaultRoom: existing.defaultRoom || 'table',
+  maxPlayers: existing.maxPlayers || 8,
+  httpPort: existing.httpPort || 8080,
+  behindProxy: existing.behindProxy || false,
+  ...(existing.hostPassword ? { hostPassword: existing.hostPassword } : {}),
 };
+const domain = argValue('--domain');
+if (domain) {
+  config.behindProxy = true;
+  config.host = domain;
+}
 config.publicUrl = argValue('--public-url')
+  || (domain && `https://${domain}`)
   || (!argValue('--host') && existing.publicUrl)
   || `https://${host}:${config.httpsPort}`;
 writeJson(CONFIG_FILE, config);
@@ -44,11 +57,12 @@ bind_addresses:
 rtc:
   tcp_port: ${config.rtcTcpPort}
   udp_port: ${config.rtcUdpPort}
-  use_external_ip: false
+  use_external_ip: ${config.behindProxy}
 keys:
   ${config.apiKey}: ${config.apiSecret}
 room:
   empty_timeout: 300
+  max_participants: ${config.maxPlayers}
 logging:
   level: info
 `);
@@ -84,5 +98,5 @@ console.log(`
 Setup done.
   Site address : ${config.publicUrl}
   LAN addresses: ${lan.join(', ') || '(none found)'}
-Next: npm run invite -- <name>   then   npm start
+Next: npm run host-password   then   npm start   and open ${config.publicUrl.replace(/\/$/, '')}/host
 `);

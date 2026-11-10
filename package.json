@@ -5,6 +5,7 @@
   "scripts": {
     "setup": "node scripts/setup.js",
     "invite": "node scripts/invite.js",
+    "host-password": "node scripts/host-password.js",
     "start": "node server/index.js"
   },
   "author": "",

@@ -1,0 +1,10 @@
+#!/usr/bin/env bash
+# The only command GitHub's deploy key may run (forced in ~ubuntu/.ssh/authorized_keys).
+# Installed root-owned as /usr/local/sbin/mtg-deploy by deploy/install.sh, so the app user can't change it.
+# Reads the new code as a .tar.gz on stdin, unpacks it and runs its deploy/update.sh.
+set -euo pipefail
+work=$(mktemp -d)
+trap 'rm -rf "$work"' EXIT
+head -c 100000000 | tar xz -C "$work" --no-same-owner
+[ -f "$work/deploy/update.sh" ] || { echo "[deploy] no deploy/update.sh in the upload"; exit 1; }
+bash "$work/deploy/update.sh"

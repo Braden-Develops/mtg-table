@@ -1,0 +1,55 @@
+# Deploys to the MTG Table server on every push to main (or by hand from the Actions tab).
+# Needs one repository secret, DEPLOY_SSH_KEY: the private half of the deploy key. On the server
+# that key may only run /usr/local/sbin/mtg-deploy, which installs the uploaded code and rolls
+# back if the app doesn't come up.
+name: Deploy
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+concurrency:
+  group: deploy
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+
+env:
+  DEPLOY_HOST: mtg.braden.world
+  # The server's SSH host key, so the upload can't be sent to an impostor.
+  DEPLOY_HOST_KEY: ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIMwirWKiQ86hlL4LrFALhSgtZJwT6ychJ2e9jn3WV0bE
+
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+      - name: Syntax check
+        run: |
+          for f in server/*.js scripts/*.js public/*.js; do node --check "$f"; done
+          for f in deploy/*.sh deploy/mtg-deploy; do bash -n "$f"; done
+
+  deploy:
+    needs: check
+    runs-on: ubuntu-latest
+    environment: production
+    steps:
+      - uses: actions/checkout@v4
+      - name: Package
+        run: |
+          echo "${GITHUB_SHA::7} $(git log -1 --format=%s)" > .deploy-version
+          tar czf /tmp/app.tgz --exclude=.git --exclude=.github .
+      - name: Upload and install
+        env:
+          DEPLOY_SSH_KEY: ${{ secrets.DEPLOY_SSH_KEY }}
+        run: |
+          install -m 700 -d ~/.ssh
+          printf '%s\n' "$DEPLOY_SSH_KEY" | tr -d '\r' > ~/.ssh/deploy
+          chmod 600 ~/.ssh/deploy
+          echo "$DEPLOY_HOST $DEPLOY_HOST_KEY" > ~/.ssh/known_hosts
+          ssh -i ~/.ssh/deploy -o IdentitiesOnly=yes -o BatchMode=yes ubuntu@"$DEPLOY_HOST" < /tmp/app.tgz

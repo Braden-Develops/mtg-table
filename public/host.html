@@ -1,0 +1,65 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="referrer" content="no-referrer">
+  <title>MTG Table · Host</title>
+  <link rel="stylesheet" href="/static/style.css">
+</head>
+<body class="host-page">
+  <main id="login" class="center-card" hidden>
+    <h1>Host</h1>
+    <p class="muted">Log in to make and manage invite links.</p>
+    <form id="login-form" class="host-form">
+      <label>Password
+        <input id="password" type="password" autocomplete="current-password" required>
+      </label>
+      <button class="primary block" type="submit">Log in</button>
+      <p id="login-error" class="error small" hidden></p>
+    </form>
+  </main>
+
+  <main id="dash" class="host-wrap" hidden>
+    <header class="host-head">
+      <div>
+        <h1>Tables</h1>
+        <p id="summary" class="muted small"></p>
+      </div>
+      <button id="logout" class="ghost">Log out</button>
+    </header>
+
+    <section class="host-card">
+      <h3>New invite</h3>
+      <form id="invite-form" class="host-invite">
+        <label>Player
+          <input id="inv-name" type="text" maxlength="32" placeholder="Name shown at the table" required>
+        </label>
+        <label>Table
+          <input id="inv-room" type="text" maxlength="32" list="room-list" placeholder="e.g. friday" required>
+          <datalist id="room-list"></datalist>
+        </label>
+        <label>Link works for
+          <select id="inv-days">
+            <option value="1">1 day</option>
+            <option value="7">1 week</option>
+            <option value="30" selected>30 days</option>
+            <option value="0">Until revoked</option>
+          </select>
+        </label>
+        <button class="primary" type="submit">Make link</button>
+      </form>
+      <p id="invite-error" class="error small" hidden></p>
+      <div id="new-link" class="host-newlink" hidden>
+        <input id="new-url" type="text" readonly>
+        <button id="copy-new" class="primary">Copy</button>
+      </div>
+    </section>
+
+    <label class="host-toggle"><input id="show-old" type="checkbox"> Show revoked and expired links</label>
+    <div id="tables"></div>
+  </main>
+
+  <script src="/static/host.js"></script>
+</body>
+</html>

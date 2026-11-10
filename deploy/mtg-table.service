@@ -1,0 +1,29 @@
+[Unit]
+Description=MTG Table (web app + LiveKit video server)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+User=mtg
+Group=mtg
+WorkingDirectory=/opt/mtg-table
+ExecStart=/usr/bin/node server/index.js
+Restart=always
+RestartSec=3
+Environment=NODE_ENV=production
+Environment=RECOG_DEBUG=0
+
+# Hardening: the app can only write its own data folder.
+NoNewPrivileges=true
+ProtectSystem=strict
+ProtectHome=true
+ReadWritePaths=/opt/mtg-table/data
+PrivateTmp=true
+ProtectKernelTunables=true
+ProtectKernelModules=true
+ProtectControlGroups=true
+RestrictSUIDSGID=true
+LockPersonality=true
+
+[Install]
+WantedBy=multi-user.target
