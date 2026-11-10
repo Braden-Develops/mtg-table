@@ -45,7 +45,7 @@ window.Identify = (() => {
     canvas.width = side;
     canvas.height = side;
     canvas.getContext('2d').drawImage(video, left, top, side, side, 0, 0, side, side);
-    return { canvas, hx: (cx - left) / side, hy: (cy - top) / side };
+    return { canvas, hx: (cx - left) / side, hy: (cy - top) / side, left, top, side, vw, vh };
   }
 
   async function ask(video, x, y, player) {
@@ -56,6 +56,12 @@ window.Identify = (() => {
     const res = await fetch(`/api/identify?${q}`, { method: 'POST', headers: { 'Content-Type': 'image/jpeg' }, body: blob });
     const data = await res.json();
     if (!res.ok) throw new Error(data.error || 'Recognition failed.');
+    // The card's outline over the whole picture (0-1), so a sticker placed from this can follow
+    // the card straight away instead of the tracker searching for it again.
+    if (Array.isArray(data.quad) && data.quad.length === 4) {
+      data.frameQuad = data.quad.map(([qx, qy]) => [(c.left + qx * c.side) / c.vw, (c.top + qy * c.side) / c.vh]);
+      if (video === localVideo()) window.Tracker?.noteIdentified(x, y, data.frameQuad);
+    }
     return data;
   }
 

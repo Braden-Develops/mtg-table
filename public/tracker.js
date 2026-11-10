@@ -501,40 +501,59 @@ window.Tracker = (() => {
     });
   }
 
-  // The model outlines a card well only near the middle of what it's shown. So: look around (x, y),
-  // then look again centred on each of the nearest candidates. Returns well-outlined cards.
-  async function locate(video, x, y, side, maxCards) {
-    // First a wide look (cards come out smaller, which the model handles better off-centre), then a
-    // close one if that found nothing near.
-    let first = await detect(video, x, y, Math.max(side * 1.3, Math.min(work.w, work.h) * 0.6));
-    if (!first.all.some((p) => Math.hypot(p.cx - x, p.cy - y) < p.b)) {
-      const close = await detect(video, x, y, side);
-      if (close.all.length) first = close;
-    }
-    const mid = [first.region.left + first.region.side / 2, first.region.top + first.region.side / 2];
-    const near = first.all.sort((p, q) => Math.hypot(p.cx - x, p.cy - y) - Math.hypot(q.cx - x, q.cy - y)).slice(0, maxCards);
-    const found = [];
-    const good = (p) => p.shape > 0.75 && p.score > 0.65;
-    for (const c of near) {
-      let cur = c;
-      let centred = Math.hypot(c.cx - mid[0], c.cy - mid[1]) < first.region.side * 0.1;
-      // Re-centre on it (twice at most) until the outline is confident.
-      for (let pass = 0; pass < 2 && !(centred && good(cur) && cur.score > 0.85); pass++) {
-        const again = await detect(video, cur.cx, cur.cy, side);
-        const best = again.poses
-          .filter((p) => Math.hypot(p.cx - cur.cx, p.cy - cur.cy) < Math.max(cur.a, p.a) * 0.6)
-          .sort((p, q) => q.score * q.shape - p.score * p.shape)[0];
-        if (!best) break;
-        centred = Math.hypot(best.cx - cur.cx, best.cy - cur.cy) < again.region.side * 0.1;
-        if (best.score * best.shape >= cur.score * cur.shape || !good(cur)) cur = best;
+  // The model outlines a card well only when it's near the middle of what it's shown and about half
+  // its height (tested on a dark card on a dark mat in dim light: 0.78 confident at 2x the card's
+  // height, 0.33 at 2.6x, nothing at 3.3x). So: look centred on (x, y) at a few sizes, re-centre on
+  // the nearest candidates, and stop at the first size that gives a confident outline.
+  // under: also accept a fainter outline (dark cards on dark mats score 0.45-0.6) if it is a clean
+  // card shape with (x, y) inside it, when nothing confident turns up at any size.
+  async function locate(video, x, y, sizes, maxCards, under = false) {
+    let faint = null;
+    const good = (p) => p.shape > 0.75 && p.score > 0.55
+      && (!cardLen || (p.b > cardLen * 0.6 && p.b < cardLen * 1.6)); // about the size of the other cards
+    const tried = [];
+    for (const side of sizes) {
+      const first = await detect(video, x, y, side);
+      const mid = [first.region.left + first.region.side / 2, first.region.top + first.region.side / 2];
+      const near = first.all
+        .filter((p) => Math.hypot(p.cx - x, p.cy - y) < Math.max(p.b, side * 0.35))
+        .sort((p, q) => Math.hypot(p.cx - x, p.cy - y) - Math.hypot(q.cx - x, q.cy - y))
+        .slice(0, maxCards);
+      tried.push(`${Math.round(side)}:${first.all.length}/${near.length}`);
+      const found = [];
+      for (const c of near) {
+        let cur = c;
+        let centred = Math.hypot(c.cx - mid[0], c.cy - mid[1]) < first.region.side * 0.1;
+        // Re-centre on it once if it wasn't in the middle or wasn't confident.
+        for (let pass = 0; pass < 1 && !(centred && good(cur) && cur.score > 0.8); pass++) {
+          const again = await detect(video, cur.cx, cur.cy, side);
+          const best = again.poses
+            .filter((p) => Math.hypot(p.cx - cur.cx, p.cy - cur.cy) < Math.max(cur.a, p.a) * 0.6)
+            .sort((p, q) => q.score * q.shape - p.score * p.shape)[0];
+          if (!best) break;
+          centred = Math.hypot(best.cx - cur.cx, best.cy - cur.cy) < again.region.side * 0.1;
+          if (best.score * best.shape >= cur.score * cur.shape || !good(cur)) cur = best;
+        }
+        if (good(cur)) found.push(cur);
+        else if (under && cur.score > 0.42 && cur.shape > 0.85 && insideQuad([x, y], cur.quad)
+          && (!cardLen || (cur.b > cardLen * 0.6 && cur.b < cardLen * 1.6))
+          && (!faint || cur.score * cur.shape > faint.score * faint.shape)) faint = cur;
       }
-      if (good(cur)) found.push(cur);
+      if (found.length) {
+        lastJob = { at: [Math.round(x), Math.round(y)], tried, found: found.map((p) => `${Math.round(p.cx)},${Math.round(p.cy)} s${p.score.toFixed(2)} sh${p.shape.toFixed(2)}`) };
+        return found;
+      }
     }
-    lastJob = { at: [Math.round(x), Math.round(y)], rough: first.all.length, found: found.map((p) => `${Math.round(p.cx)},${Math.round(p.cy)} s${p.score.toFixed(2)} sh${p.shape.toFixed(2)}`) };
-    return found;
+    lastJob = { at: [Math.round(x), Math.round(y)], tried, found: [], faint: faint && `${Math.round(faint.cx)},${Math.round(faint.cy)} s${faint.score.toFixed(2)} sh${faint.shape.toFixed(2)}` };
+    return faint ? [faint] : [];
   }
 
-  const cropFor = (mult) => (cardLen ? cardLen * mult : Math.min(work.w, work.h) * 0.5);
+  // Crop sizes (working pixels) to try, as multiples of a card's height on camera; before any card
+  // has been measured, as shares of the picture's height.
+  const sizesFor = (mults, start = 0) => {
+    const list = cardLen ? mults.map((m) => cardLen * m) : [0.42, 0.32, 0.55, 0.26].map((f) => Math.min(work.w, work.h) * f);
+    return list.slice(start % list.length).concat(list.slice(0, start % list.length));
+  };
 
   // Pick the next job for the model: find lost cards first, then check doubtful ones, then new
   // stickers, then straighten cards that came to rest.
@@ -564,7 +583,8 @@ window.Tracker = (() => {
     t.phase = 'acquire';
     const pt = [t.x * work.w, t.y * work.h];
     // The model can miss a card for a given framing: each retry frames it differently.
-    const cards = await locate(video, pt[0], pt[1], cropFor([2.6, 2, 3.3][t.tries % 3]), 2);
+    const seeded = fromIdentify(pt);
+    const cards = seeded ? [seeded] : await locate(video, pt[0], pt[1], sizesFor([2, 2.6, 1.6, 3.2], t.tries), 1, true);
     if (t.phase !== 'acquire' || !tracks.has(t.id)) return; // moved or removed meanwhile
     const under = cards.filter((p) => insideQuad([t.x * work.w, t.y * work.h], p.quad))
       .sort((a, b) => b.score * b.shape - a.score * a.shape)[0];
@@ -585,7 +605,7 @@ window.Tracker = (() => {
     t.retryAt = now + 700;
     // Where it was last seen for sure (a doubtful track may have drifted onto something else).
     const at = doubt || t.weakMs > 0 ? { ...t.good } : restingGuess(t);
-    const cards = await locate(video, at.cx, at.cy, cropFor(doubt ? 2.6 : 3), doubt ? 1 : 2);
+    const cards = await locate(video, at.cx, at.cy, sizesFor(doubt ? [2] : [2, 3]), doubt ? 1 : 2);
     if (t.phase !== 'track' || !tracks.has(t.id) || (!doubt && t.lostMs === 0)) return; // found meanwhile
     let best = null;
     for (const p of cards) {
@@ -601,6 +621,21 @@ window.Tracker = (() => {
         if (r.score >= (near ? RECOVER_NEAR : RECOVER_FAR) && (!best || rank > best.rank)) best = { pose: p, th, rank };
       }
     }
+    // Nothing looks like the template (lighting changed, something covered part of it while it was
+    // learned), but the model clearly sees one card the same size close to where ours was, and no
+    // other sticker is following it: that's ours.
+    if (!best && !doubt) {
+      const mine = cards.filter((p) => p.score > 0.55 && p.shape > 0.85
+        && Math.abs(p.b / t.b - 1) < 0.25
+        && Math.hypot(p.cx - t.pose.cx, p.cy - t.pose.cy) < t.b * 1.3
+        && ![...tracks.values()].some((o) => o !== t && o.phase === 'track' && !o.lostMs
+          && Math.hypot(o.pose.cx - p.cx, o.pose.cy - p.cy) < o.a * 0.5));
+      if (mine.length === 1) {
+        const p = mine[0];
+        const th = Math.abs(angDiff(p.th, t.pose.th)) <= Math.PI / 2 ? p.th : p.th + Math.PI;
+        best = { pose: p, th, rank: 0 };
+      }
+    }
     const current = ncc(t, t.pose.cx, t.pose.cy, t.pose.th, false);
     // The model confirms a card about as good or better: take its outline and a fresh template.
     if (best && (!doubt || best.rank > current - 0.05)) reanchor(t, { ...best.pose, th: best.th });
@@ -610,7 +645,7 @@ window.Tracker = (() => {
   async function straighten(video, t) {
     t.moved = false;
     const at = { ...t.pose };
-    const cards = await locate(video, at.cx, at.cy, cropFor(2.6), 1);
+    const cards = await locate(video, at.cx, at.cy, sizesFor([2]), 1);
     if (t.phase !== 'track' || t.moved || t.lostMs) return;
     const p = cards.find((q) => Math.hypot(q.cx - at.cx, q.cy - at.cy) < t.a * 0.35);
     if (!p) return;
@@ -831,16 +866,39 @@ window.Tracker = (() => {
     };
   }
 
+  // Cards the server just recognised on my camera (click point and outline, 0-1 over the picture):
+  // a sticker placed from one of those starts following that outline without searching again.
+  const identified = [];
+  function noteIdentified(x, y, quad) {
+    identified.unshift({ x, y, quad, at: performance.now() });
+    identified.length = Math.min(identified.length, 10);
+  }
+  function fromIdentify([px, py]) {
+    if (!work) return null;
+    const now = performance.now();
+    for (const r of identified) {
+      if (now - r.at > 60000) break;
+      if (Math.hypot(r.x * work.w - px, r.y * work.h - py) > work.w * 0.03) continue;
+      const quad = r.quad.map(([qx, qy]) => [qx * work.w, qy * work.h]);
+      if (!insideQuad([px, py], quad)) continue;
+      const pose = { ...poseFromQuad(quad), quad, score: 1 };
+      if (pose.shape < 0.6 || (cardLen && (pose.b < cardLen * 0.6 || pose.b > cardLen * 1.6))) continue;
+      lastJob = { at: [Math.round(px), Math.round(py)], identified: true };
+      return pose;
+    }
+    return null;
+  }
+
   // For testing from the console: what the model finds around a point (working pixels).
   async function probe(x, y, side, maxCards = 2) {
     while (jobBusy) await new Promise((r) => setTimeout(r, 50));
     jobBusy = true;
     try {
-      return (await locate(localVideo(), x, y, side, maxCards)).map((p) => ({ cx: Math.round(p.cx), cy: Math.round(p.cy), a: Math.round(p.a), b: Math.round(p.b), th: p.th.toFixed(2), shape: p.shape.toFixed(2), score: p.score.toFixed(2) }));
+      return (await locate(localVideo(), x, y, [].concat(side), maxCards)).map((p) => ({ cx: Math.round(p.cx), cy: Math.round(p.cy), a: Math.round(p.a), b: Math.round(p.b), th: p.th.toFixed(2), shape: p.shape.toFixed(2), score: p.score.toFixed(2) }));
     } finally {
       jobBusy = false;
     }
   }
 
-  return { init, setRoom, onData, sync, setEnabled, isEnabled: () => enabled, status, debug, probe };
+  return { init, setRoom, onData, sync, setEnabled, isEnabled: () => enabled, status, debug, probe, noteIdentified };
 })();
