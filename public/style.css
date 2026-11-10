@@ -974,3 +974,21 @@ body.dragging-card, body.dragging-card * { cursor: grabbing !important; }
   .host-invites li { flex-direction: column; align-items: stretch; }
   .host-invites .acts > * { flex: 1; }
 }
+
+/* ---------- camera dialog: live preview, and no blur so you can see the table behind it ---------- */
+#camera-dialog::backdrop { background: rgba(8, 6, 12, .25); backdrop-filter: none; -webkit-backdrop-filter: none; }
+#camera-dialog[open] { display: flex; flex-direction: column; }
+#camera-dialog .camera-body { flex: 1; min-height: 0; max-height: none; }
+.cam-preview {
+  position: relative;
+  flex-shrink: 0;
+  height: min(38vh, 270px);
+  margin: 0 var(--sp-6) var(--sp-2);
+  background: #000;
+  border-radius: var(--r-md);
+  overflow: hidden;
+}
+.cam-preview video { width: 100%; height: 100%; object-fit: contain; display: block; transition: transform .2s var(--ease); }
+.cam-preview.zoomed video { transform: scale(2); }
+.cam-preview .chip { position: absolute; right: var(--sp-2); bottom: var(--sp-2); background: var(--glass-strong); }
+.cam-preview .chip.on { background: var(--accent); color: #fff; }

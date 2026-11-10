@@ -227,6 +227,11 @@
   <!-- Your camera's picture and hardware settings -->
   <dialog id="camera-dialog" class="sticker-dialog">
     <div class="dialog-head"><h2>Your camera picture</h2></div>
+    <!-- Live preview of what everyone receives, so focus and picture changes can be judged as you go -->
+    <div class="cam-preview" id="cam-preview-wrap">
+      <video id="cam-preview" autoplay muted playsinline></video>
+      <button type="button" id="cam-preview-zoom" class="chip" title="Look closer at the middle of the picture, to judge focus">2× zoom</button>
+    </div>
     <div id="camera-body" class="camera-body"></div>
     <div class="dialog-foot">
       <button id="camera-reset">Reset all</button>

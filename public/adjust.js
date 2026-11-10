@@ -135,7 +135,9 @@ window.Adjust = (() => {
   });
 
   // ---------- camera hardware settings ----------
-  const mediaTrack = () => localTrack?.mediaStreamTrack;
+  // The real webcam track. With a picture adjustment on (sharpen, rotate…), LiveKit's mediaStreamTrack
+  // is the processed canvas video, which has no camera controls, so ask for the source track.
+  const mediaTrack = () => localTrack?._mediaStreamTrack ?? localTrack?.mediaStreamTrack;
   const cameraKey = () => `camera:${mediaTrack()?.getSettings().deviceId || 'default'}`;
 
   function cameraSupport() {
@@ -173,6 +175,11 @@ window.Adjust = (() => {
 
   function openCameraDialog() {
     renderCameraDialog();
+    // Live preview of the processed picture (LiveKit keeps attached elements up to date when
+    // adjustments switch the processor on or off).
+    const preview = $('cam-preview');
+    $('cam-preview-wrap').hidden = !localTrack;
+    if (localTrack) localTrack.attach(preview);
     $('camera-dialog').showModal();
   }
 
@@ -276,6 +283,15 @@ window.Adjust = (() => {
       renderCameraDialog();
     });
     $('camera-close').addEventListener('click', () => dlg.close());
+    $('cam-preview-zoom').addEventListener('click', (e) => {
+      const on = $('cam-preview-wrap').classList.toggle('zoomed');
+      e.currentTarget.classList.toggle('on', on);
+    });
+    dlg.addEventListener('close', () => {
+      localTrack?.detach($('cam-preview'));
+      $('cam-preview-wrap').classList.remove('zoomed');
+      $('cam-preview-zoom').classList.remove('on');
+    });
   }
 
   function init() {

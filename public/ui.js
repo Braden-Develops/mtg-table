@@ -116,7 +116,21 @@
       if (e.target === grid) unfocus();
     });
     new ResizeObserver(relayout).observe(grid);
-    new MutationObserver(relayout).observe(grid, { childList: true, subtree: true, attributes: true, attributeFilter: ['class'] });
+    // While a video is enlarged, the big one follows the turn: when the turn passes, the new
+    // active player's video takes the big spot. Enlarging someone else mid-turn sticks until then.
+    let lastActive = null;
+    const followTurn = () => {
+      const active = grid.querySelector(':scope > .tile.active-turn');
+      if (active === lastActive) return;
+      lastActive = active;
+      const focused = grid.querySelector(':scope > .tile.focused');
+      if (active && focused && focused !== active) {
+        focused.classList.remove('focused');
+        active.classList.add('focused');
+      }
+    };
+    new MutationObserver(() => { followTurn(); relayout(); })
+      .observe(grid, { childList: true, subtree: true, attributes: true, attributeFilter: ['class'] });
     window.addEventListener('resize', relayout);
   });
 })();
