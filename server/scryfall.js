@@ -27,7 +27,8 @@ function scryfallGet(path) {
     lastRequest = Date.now();
     const res = await fetch(url, { headers: HEADERS });
     const body = await res.json().catch(() => ({}));
-    return remember(url, { status: res.status, body });
+    // Only real answers are remembered: a rate limit or an outage must not stick for a day.
+    return res.status === 200 || res.status === 404 ? remember(url, { status: res.status, body }) : { status: res.status, body };
   });
   queue = run.catch(() => {});
   return run;
@@ -50,33 +51,43 @@ function scryfallPost(path, payload) {
   return run;
 }
 
-// Look up many cards at once (Scryfall allows 75 per request).
-// Returns { cards: Map<lowercased name, card>, notFound: [names] }.
-export async function lookupMany(names) {
-  const unique = [...new Set(names.map((n) => n.trim()).filter(Boolean))];
-  const cards = new Map();
-  const remember = (card) => {
-    const trimmed = trimCard(card);
-    cards.set(card.name.toLowerCase(), trimmed);
-    // "Fire // Ice" and double-faced cards can be listed by their front-face name.
-    for (const face of card.card_faces || []) if (face.name) cards.set(face.name.toLowerCase(), trimmed);
-  };
-  for (let i = 0; i < unique.length; i += 75) {
-    const chunk = unique.slice(i, i + 75);
-    const { status, body } = await scryfallPost('/cards/collection', { identifiers: chunk.map((name) => ({ name })) });
-    if (status !== 200) throw new Error(body?.details || `Scryfall returned ${status}`);
-    for (const card of body.data || []) remember(card);
-  }
-  const notFound = unique.filter((n) => !cards.has(n.toLowerCase()));
-  // Second chance for typos/odd spellings: fuzzy match one by one (few cards, so this is cheap).
-  for (const name of notFound.slice(0, 15)) {
-    const { status, body } = await scryfallGet(`/cards/named?fuzzy=${encodeURIComponent(name)}`);
-    if (status === 200) {
-      remember(body);
-      cards.set(name.toLowerCase(), trimCard(body));
+// Look up deck entries at once (Scryfall allows 75 per request). An entry is { name } or, when the
+// deck list says which printing, { name, set, number }; a printing Scryfall doesn't know falls back
+// to the name. Returns { cards: [card or null, one per entry], notFound: [names] }.
+export async function lookupEntries(entries) {
+  const cards = entries.map(() => null);
+  const lower = (v) => String(v || '').toLowerCase();
+  const samePrint = (a, b) => lower(a.set) === lower(b.set) && lower(a.number) === lower(b.number);
+  const sameName = (a, b) => lower(a.name) === lower(b.name);
+  // Ask for each distinct entry once, then hand the answer to every entry like it.
+  const ask = async (indexes, same, identifier, matches) => {
+    const once = indexes.filter((k, i) => indexes.findIndex((j) => same(entries[j], entries[k])) === i);
+    for (let i = 0; i < once.length; i += 75) {
+      const chunk = once.slice(i, i + 75);
+      const { status, body } = await scryfallPost('/cards/collection', { identifiers: chunk.map((k) => identifier(entries[k])) });
+      if (status !== 200) throw new Error(body?.details || `Scryfall returned ${status}`);
+      for (const card of body.data || []) {
+        for (const k of chunk) if (!cards[k] && matches(entries[k], card)) cards[k] = trimCard(card);
+      }
     }
+    for (const k of indexes) cards[k] ??= cards[once.find((j) => same(entries[j], entries[k]))] || null;
+  };
+  const all = entries.map((_, k) => k);
+  // Exact printings first.
+  await ask(all.filter((k) => entries[k].set && entries[k].number), samePrint,
+    (e) => ({ set: lower(e.set), collector_number: String(e.number) }),
+    (e, card) => lower(card.set) === lower(e.set) && lower(card.collector_number) === lower(e.number));
+  // The rest by name. "Fire // Ice" and double-faced cards can be listed by their front-face name.
+  await ask(all.filter((k) => !cards[k]), sameName, (e) => ({ name: e.name }),
+    (e, card) => lower(card.name) === lower(e.name) || (card.card_faces || []).some((f) => lower(f.name) === lower(e.name)));
+  // Second chance for typos/odd spellings: fuzzy match one by one (few cards, so this is cheap).
+  const missing = () => [...new Set(all.filter((k) => !cards[k]).map((k) => entries[k].name))];
+  for (const name of missing().slice(0, 15)) {
+    const { status, body } = await scryfallGet(`/cards/named?fuzzy=${encodeURIComponent(name)}`);
+    if (status !== 200) continue;
+    for (const k of all) if (!cards[k] && entries[k].name === name) cards[k] = trimCard(body);
   }
-  return { cards, notFound: unique.filter((n) => !cards.has(n.toLowerCase())) };
+  return { cards, notFound: missing() };
 }
 
 export async function autocomplete(q) {
@@ -120,19 +131,36 @@ function trimCard(card) {
   };
 }
 
-// Every distinct artwork of a card (newest first), for card recognition: a player's copy may be any
-// printing. Each face of a double-faced card is its own artwork. [{ key, small, normal }]
-export async function artworks(name, max = 16) {
-  const q = `!"${String(name).replace(/"/g, '')}" unique:art`;
-  const { status, body } = await scryfallGet(`/cards/search?q=${encodeURIComponent(q)}&order=released&dir=desc&include_extras=false`);
-  if (status !== 200) return [];
+// Every different-looking printing of a card (newest first), for card recognition: a player's copy
+// may be any of them. Printings that share the artwork but not the frame (showcase, etched, retro,
+// borderless, full-art) look different on camera, so each counts; foil-only variants of the same
+// look don't. Each face of a double-faced card is its own picture. [{ key, small, normal }]
+// Throws when Scryfall can't be reached, so the caller knows the list isn't complete.
+const MAX_LOOKS = 40;
+const MAX_LOOKS_BASIC = 60; // basic lands have hundreds; the newest are the likeliest at a table
+export async function artworks(name) {
+  const q = `!"${String(name).replace(/"/g, '')}" game:paper`;
+  let next = `/cards/search?q=${encodeURIComponent(q)}&unique=prints&order=released&dir=desc&include_extras=false`;
   const out = [];
-  for (const card of body.data || []) {
-    const faces = card.image_uris ? [card.image_uris] : (card.card_faces || []).map((f) => f.image_uris).filter(Boolean);
-    faces.forEach((img, i) => {
-      if (img.normal) out.push({ key: `${card.id}/${i}`, small: img.small || img.normal, normal: img.normal });
-    });
-    if (out.length >= max) break;
+  const looks = new Set();
+  let max = MAX_LOOKS;
+  for (let page = 0; next && page < 8 && out.length < max; page++) {
+    const { status, body } = await scryfallGet(next);
+    if (status === 404) break; // no such card
+    if (status !== 200) throw new Error(`Scryfall returned ${status}`);
+    for (const card of body.data || []) {
+      if (/\bBasic\b/.test(card.type_line || '')) max = MAX_LOOKS_BASIC;
+      const faces = card.image_uris ? [card] : (card.card_faces || []).filter((f) => f.image_uris);
+      faces.forEach((face, i) => {
+        const look = [face.illustration_id || card.illustration_id || card.id, card.frame, card.border_color,
+          [...(card.frame_effects || [])].sort().join('+'), card.full_art ? 'full' : '', card.textless ? 'textless' : '', i].join('|');
+        const img = face.image_uris;
+        if (looks.has(look) || !img.normal || out.length >= max) return;
+        looks.add(look);
+        out.push({ key: `${card.id}/${i}`, small: img.small || img.normal, normal: img.normal });
+      });
+    }
+    next = body.has_more && body.next_page ? body.next_page.replace(API, '') : null;
   }
-  return out.slice(0, max);
+  return out;
 }

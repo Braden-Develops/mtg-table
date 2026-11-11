@@ -53,8 +53,6 @@ window.AutoRead = (() => {
   // Cards really held up score 0.8-0.99 with the model; other things that change the picture
   // (a hand, a sleeve, the camera moving) at most about 0.55.
   const isHeld = (c) => c.score > 0.65 && c.shape > 0.7 && c.b > HELD_MIN;
-  // A match good enough to tag without asking (real reads of held cards score 0.65-0.75).
-  const SURE = 0.5;
   const localVideo = () => document.querySelector('.tile[data-local="1"] video');
 
   function init(opts) {
@@ -204,36 +202,25 @@ window.AutoRead = (() => {
     }
   }
 
-  // Find a card held up in the changed patch. The model is only sure of a card near the middle of
-  // what it's shown, and the patch is card + hand + arm (often down to the edge of the picture), so:
-  // guess where the card is from the top of the patch (cards are held from below), then look again
-  // centred on the likeliest candidates. Resolves with the card, false, or null without a model.
+  // Find a card held up in the changed patch. The patch is card + hand + arm (often down to the edge
+  // of the picture), so: guess where the card is from the top of the patch (cards are held from
+  // below) at a few likely sizes; Tracker looks there and homes in on a card if there is one.
+  // Resolves with the card, false, or null without a model.
   async function findHeld(video, p) {
     const pick = (cards) => cards.filter(isHeld).sort((a, b) => b.score * b.shape - a.score * a.shape)[0];
     // Its top edge is the top of the patch; guess a few card sizes, centred on the patch's top part.
-    const seeds = [0.42, 0.32, 0.55].map((len) => {
+    const tall = (p.y1 - p.y0 + 1) / H;
+    const seeds = [0.42, 0.32, 0.55].filter((len) => len < tall * 1.3).map((len) => {
       const rows = p.y0 + len * H;
       let sx = 0;
       let n = 0;
       for (const j of p.pix) if (j / W < rows) { sx += j % W; n++; }
       return [(n ? sx / n + 0.5 : (p.x0 + p.x1 + 1) / 2) / W, p.y0 / H + len / 2, Math.min(1, len * 2)];
     });
-    const rough = [];
     for (const [x, y, side] of seeds) {
       const cards = await window.Tracker.findCards(video, x, y, side);
       if (!cards) return null;
       const hit = pick(cards);
-      if (hit) return hit;
-      rough.push(...cards.filter((c) => c.score > 0.2 && c.b > HELD_MIN * 0.6));
-    }
-    rough.sort((a, b) => b.score - a.score);
-    const tried = [];
-    for (const c of rough) {
-      if (tried.length >= 2) break;
-      if (tried.some((t) => Math.hypot(t.cx - c.cx, t.cy - c.cy) < 0.05)) continue;
-      tried.push(c);
-      const cards = await window.Tracker.findCards(video, c.cx, c.cy, Math.min(1, Math.max(0.5, c.b * 2)));
-      const hit = cards && pick(cards);
       if (hit) return hit;
     }
     return false;
@@ -315,8 +302,10 @@ window.AutoRead = (() => {
       hold.reads++;
       lastRead = performance.now();
       readTimes.push(lastRead);
-      result = await window.Identify.read(video, crop.cx, crop.cy, frac);
-      if (result?.found && result.confident && result.matches?.[0]?.score >= SURE) break;
+      // The card's width as a share of the crop's, so the server knows what size to look for.
+      const share = (held.a * video.videoHeight) / (frac * Math.min(video.videoWidth, video.videoHeight));
+      result = await window.Identify.read(video, crop.cx, crop.cy, frac, share);
+      if (result?.found && result.confident) break;
       if (hold.reads < READS_PER_HOLD) await new Promise((r) => setTimeout(r, 300));
     }
     if (!hold) return;
@@ -333,7 +322,8 @@ window.AutoRead = (() => {
     hold.card = best.card;
     hold.since = performance.now();
     phase = 'held';
-    if (result.confident && best.score >= SURE) {
+    const lookup = result.id;
+    if (result.confident) {
       toast(`Read ${best.card.name}. Put it on the table and it gets a sticker.`, [
         ['Place it myself', () => { const c = hold?.card; done(); if (c) window.Marks.showCard(c); }],
         ['✕', () => done()],
@@ -343,8 +333,11 @@ window.AutoRead = (() => {
     // Not sure: only tag it if the player says it's right.
     hold.unsure = true;
     toast(`Not sure: is it ${best.card.name}?`, [
-      ['Yes', () => { if (hold) { hold.unsure = false; toast(`Put ${best.card.name} on the table and it gets a sticker.`, [['✕', () => done()]], LAND_WAIT_MS); } }],
-      ['Pick it myself', () => { done(); window.Marks.showCard(best.card); }],
+      ['Yes', () => {
+        window.Identify.feedback(lookup, best.card.name, 'confirm');
+        if (hold) { hold.unsure = false; toast(`Put ${best.card.name} on the table and it gets a sticker.`, [['✕', () => done()]], LAND_WAIT_MS); }
+      }],
+      ['Pick it myself', () => { window.Identify.feedback(lookup, null, 'reject'); done(); window.Marks.showCard(best.card); }],
       ['✕', () => done()],
     ], LAND_WAIT_MS);
   }
@@ -378,16 +371,14 @@ window.AutoRead = (() => {
       const x = (p.cx + 0.5) / W;
       const y = (p.cy + 0.5) / H;
       const h = (p.y1 - p.y0 + 1) / H;
-      // The model is fussy about the crop size: try a couple.
-      for (const k of [2, 3.2]) {
-        const cards = await window.Tracker.findCards(video, x, y, Math.min(1, Math.max(0.3, Math.max(size || 0, h) * k)));
-        if (!hold) return; // dismissed meanwhile
-        // Only "is there a card here" (an emptied spot or a hand shows none), so a loose outline will do.
-        const c = (cards || []).filter((q) => q.score > 0.35 && q.b > 0.08 && q.b < HELD_MIN * 1.3
-          && Math.abs(q.cx - x) < 0.08 && Math.abs(q.cy - y) < 0.12)
-          .sort((a, b) => b.score - a.score)[0];
-        if (c) { fits.push({ x: c.cx, y: c.cy }); break; }
-      }
+      // A card lying on the table, upright or tapped, about the size of the others (or of the patch).
+      const cards = await window.Tracker.findCards(video, x, y, Math.min(1, Math.max(0.16, (size || h) * 2)), { table: true });
+      if (!hold) return; // dismissed meanwhile
+      // Only "is there a card here" (an emptied spot or a hand shows none).
+      const c = (cards || []).filter((q) => q.score > 0.6 && q.b > 0.08 && q.b < HELD_MIN * 1.3
+        && Math.abs(q.cx - x) < 0.08 && Math.abs(q.cy - y) < 0.12)
+        .sort((a, b) => b.score - a.score)[0];
+      if (c) fits.push({ x: c.cx, y: c.cy });
     }
     lastLand = { changed: changed.map((p) => [+((p.cx + 0.5) / W).toFixed(2), +((p.cy + 0.5) / H).toFixed(2), +area(p).toFixed(3)]), fits, spots, lo, hi };
     const card = hold.card;

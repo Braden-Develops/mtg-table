@@ -1,104 +1,153 @@
 // Card recognition.
 //  1. Corner finder (DETRPose, MIT, dhvazquez/mtg_card_pose_estimation) finds the card's 4 corners.
+//     It only works on a card framed the way it was trained (see public/cardfind.js, which holds
+//     the search shared with the browser's card tracking).
 //  2. We straighten the card to 320x448 with a perspective warp.
-//  3. Embedder (EfficientNet-Lite0, MIT, dhvazquez/mtg_card_identification_embeddings) turns it into
-//     a 256-number vector. The closest vector among the decks at the table is the answer.
-// Reference vectors come from Scryfall's card images (every artwork of each deck card) and are
-// cached in data/embeddings-v3.bin.
+//  3. Two independent comparisons against reference pictures of the cards in the decks at the table:
+//     - Embedder (EfficientNet-Lite0, MIT, dhvazquez/mtg_card_identification_embeddings): a
+//       256-number vector per picture. Good on sharp pictures; a webcam card 150 px wide is not
+//       one (the same Scryfall image shrunk to 110 px scores 0.36 against itself).
+//     - A plain low-resolution comparison (32x45, colour and local contrast). Blur doesn't hurt
+//       it, but it needs the outline to fit, so for the likeliest cards the picture is also tried
+//       trimmed a little on each side (the outline is often the sleeve, or loose on a dark mat).
+//     Each is turned into "how far above the other reference pictures" and the two are added.
+// Reference pictures come from Scryfall (every different-looking printing of each deck card) and
+// their vectors are cached in data/references-v4.bin.
 import fs from 'node:fs';
 import path from 'node:path';
 import ort from 'onnxruntime-node';
 import sharp from 'sharp';
+import '../public/cardfind.js';
 import { DATA_DIR, ROOT } from '../scripts/lib.js';
 import { artworks } from './scryfall.js';
 
+const CF = globalThis.CardFind;
 const POSE_MODEL = path.join(ROOT, 'models', 'mtg_4kp_s_r4b.onnx');
 const EMBED_MODEL = path.join(ROOT, 'models', 'mtg_embed_fp32.onnx');
-const CACHE_FILE = path.join(DATA_DIR, 'embeddings-v3.bin');
-const KEY = 48; // bytes per record key: '<scryfall id>/<face>@<size>'
+const CACHE_FILE = path.join(DATA_DIR, 'references-v4.bin');
 const W = 320;
 const H = 448;
 const DIM = 256;
 const POSE_SIZE = 640;
 const MEAN = [0.485, 0.456, 0.406];
 const STD = [0.229, 0.224, 0.225];
+// The server shares its two cores with the video relay: RECOG_THREADS=1 keeps one free during lookups.
+const THREADS = Math.max(1, Number(process.env.RECOG_THREADS) || 2);
 
 let sessions = null;
-let queue = Promise.resolve(); // one model run at a time keeps memory and CPU predictable
-const embeddings = loadCache(); // '<scryfallId>/<face>' -> Float32Array(256)
-let cacheDirty = false;
 
 export function modelsAvailable() {
   return fs.existsSync(POSE_MODEL) && fs.existsSync(EMBED_MODEL);
 }
 
-async function getSessions() {
-  if (!sessions) {
-    const opts = { graphOptimizationLevel: 'all', intraOpNumThreads: 2 };
-    sessions = {
+function getSessions() {
+  sessions ??= (async () => {
+    const opts = { graphOptimizationLevel: 'all', intraOpNumThreads: THREADS };
+    return {
       pose: await ort.InferenceSession.create(POSE_MODEL, opts),
       embed: await ort.InferenceSession.create(EMBED_MODEL, opts),
     };
-  }
+  })();
   return sessions;
 }
 
-function serial(fn) {
-  const run = queue.then(fn);
-  queue = run.catch(() => {});
-  return run;
+// Load the models before the first click needs them.
+export function warmUp() {
+  if (modelsAvailable()) getSessions().catch((err) => console.warn('Recognition models failed to load:', err.message));
 }
 
-// ---------- embedding cache (binary: [40-byte key][256 float32] repeated) ----------
+// One model run at a time keeps memory and CPU predictable. Lookups go ahead of background indexing.
+const waiting = { urgent: [], background: [] };
+let running = false;
+function serial(fn, urgent = true) {
+  return new Promise((resolve, reject) => {
+    waiting[urgent ? 'urgent' : 'background'].push({ fn, resolve, reject });
+    pump();
+  });
+}
+async function pump() {
+  if (running) return;
+  running = true;
+  for (;;) {
+    const job = waiting.urgent.shift() || waiting.background.shift();
+    if (!job) break;
+    try { job.resolve(await job.fn()); } catch (err) { job.reject(err); }
+  }
+  running = false;
+}
+
+// ---------- reference pictures ----------
+// Each reference: the embedder's vector for the picture at a few sharpness levels (it is very
+// sensitive to sharpness, and we don't know how sharp the camera is), and the low-res feature.
+const RENDITIONS = [
+  (img) => img,
+  async (img, base) => sharp(await sharp(base).resize(110).toBuffer()).resize(W, H, { fit: 'fill' }),
+  async (img, base) => sharp(await sharp(base).resize(160).toBuffer()).resize(W, H, { fit: 'fill' }).blur(0.8),
+  async (img, base) => sharp(await sharp(base).resize(220).toBuffer()).resize(W, H, { fit: 'fill' }).blur(0.6),
+];
+const LW = 32; // low-res comparison size
+const LH = 45;
+const LM = 3; // margin left out (card border, sleeve)
+const LN = (LW - 2 * LM) * (LH - 2 * LM);
+const LOW = LN * 4; // 3 colour planes + 1 local-contrast plane
+const KEY = 48; // bytes per record key: '<scryfall id>/<face>'
+const RECORD = KEY + (RENDITIONS.length * DIM + LOW) * 4;
+
+const refs = loadCache(); // '<scryfallId>/<face>' -> { emb: [Float32Array(256) x renditions], low: Float32Array(LOW) }
+let cacheFd = null;
+
 function loadCache() {
   const map = new Map();
   try {
     const buf = fs.readFileSync(CACHE_FILE);
-    const rec = KEY + DIM * 4;
-    for (let off = 0; off + rec <= buf.length; off += rec) {
+    for (let off = 0; off + RECORD <= buf.length; off += RECORD) {
       const id = buf.toString('ascii', off, off + KEY).trimEnd();
-      const vec = new Float32Array(DIM);
-      for (let i = 0; i < DIM; i++) vec[i] = buf.readFloatLE(off + KEY + i * 4);
-      map.set(id, vec);
+      const floats = new Float32Array(buf.buffer.slice(buf.byteOffset + off + KEY, buf.byteOffset + off + RECORD));
+      map.set(id, {
+        emb: RENDITIONS.map((_, r) => floats.subarray(r * DIM, (r + 1) * DIM)),
+        low: floats.subarray(RENDITIONS.length * DIM),
+      });
     }
+    // A record cut short by a crash would shift everything written after it.
+    if (buf.length % RECORD) fs.truncateSync(CACHE_FILE, buf.length - (buf.length % RECORD));
   } catch { /* no cache yet */ }
   return map;
 }
 
-function saveCache() {
-  if (!cacheDirty) return;
-  cacheDirty = false;
-  const rec = KEY + DIM * 4;
-  const buf = Buffer.alloc(embeddings.size * rec);
-  let off = 0;
-  for (const [id, vec] of embeddings) {
-    buf.write(id.padEnd(KEY).slice(0, KEY), off, 'ascii');
-    for (let i = 0; i < DIM; i++) buf.writeFloatLE(vec[i], off + KEY + i * 4);
-    off += rec;
+function appendCache(id, ref) {
+  const buf = Buffer.alloc(RECORD);
+  buf.write(id.padEnd(KEY).slice(0, KEY), 0, 'ascii');
+  let off = KEY;
+  for (const v of [...ref.emb, ref.low]) for (let i = 0; i < v.length; i++, off += 4) buf.writeFloatLE(v[i], off);
+  try {
+    cacheFd ??= fs.openSync(CACHE_FILE, 'a');
+    fs.writeSync(cacheFd, buf);
+  } catch (err) {
+    console.warn('Could not save card references:', err.message);
   }
-  fs.writeFile(CACHE_FILE, buf, () => {});
 }
 
 // ---------- image helpers ----------
-// RGB bytes (W x H) -> normalized NCHW float tensor for the embedder.
-function toEmbedTensor(rgb) {
-  const plane = W * H;
-  const data = new Float32Array(3 * plane);
-  for (let i = 0; i < plane; i++) {
-    for (let c = 0; c < 3; c++) data[c * plane + i] = (rgb[i * 3 + c] / 255 - MEAN[c]) / STD[c];
-  }
-  return new ort.Tensor('float32', data, [1, 3, H, W]);
-}
-
-async function embedRgb(rgb) {
+// RGB pictures (W x H each) -> unit vectors from the embedder, in one run.
+async function embedRgb(pictures) {
   const { embed } = await getSessions();
-  const out = await embed.run({ input: toEmbedTensor(rgb) });
-  const v = Float32Array.from(out.embedding.data);
-  let n = 0;
-  for (const x of v) n += x * x;
-  n = Math.sqrt(n) || 1;
-  for (let i = 0; i < v.length; i++) v[i] /= n;
-  return v;
+  const plane = W * H;
+  const data = new Float32Array(pictures.length * 3 * plane);
+  pictures.forEach((rgb, n) => {
+    const at = n * 3 * plane;
+    for (let i = 0; i < plane; i++) {
+      for (let c = 0; c < 3; c++) data[at + c * plane + i] = (rgb[i * 3 + c] / 255 - MEAN[c]) / STD[c];
+    }
+  });
+  const out = await embed.run({ input: new ort.Tensor('float32', data, [pictures.length, 3, H, W]) });
+  return pictures.map((_, n) => {
+    const v = Float32Array.from(out.embedding.data.subarray(n * DIM, (n + 1) * DIM));
+    let norm = 0;
+    for (const x of v) norm += x * x;
+    norm = Math.sqrt(norm) || 1;
+    for (let i = 0; i < v.length; i++) v[i] /= norm;
+    return v;
+  });
 }
 
 const dot = (a, b) => {
@@ -136,194 +185,279 @@ function homography(src, dst) {
   return [...h, 1];
 }
 
+// Brightness-weighted sample of an RGB picture at (sx, sy), added into acc. Outside: nearest edge pixel.
+function sampleInto(acc, rgb, sw, sh, sx, sy) {
+  if (sx < 0) sx = 0; else if (sx > sw - 1.001) sx = sw - 1.001;
+  if (sy < 0) sy = 0; else if (sy > sh - 1.001) sy = sh - 1.001;
+  const x0 = sx | 0;
+  const y0 = sy | 0;
+  const fx = sx - x0;
+  const fy = sy - y0;
+  const i = (y0 * sw + x0) * 3;
+  const j = i + sw * 3;
+  const w00 = (1 - fx) * (1 - fy);
+  const w10 = fx * (1 - fy);
+  const w01 = (1 - fx) * fy;
+  const w11 = fx * fy;
+  acc[0] += rgb[i] * w00 + rgb[i + 3] * w10 + rgb[j] * w01 + rgb[j + 3] * w11;
+  acc[1] += rgb[i + 1] * w00 + rgb[i + 4] * w10 + rgb[j + 1] * w01 + rgb[j + 4] * w11;
+  acc[2] += rgb[i + 2] * w00 + rgb[i + 5] * w10 + rgb[j + 2] * w01 + rgb[j + 5] * w11;
+}
+
 // Warp the quad `corners` ([TL,TR,BR,BL] in source pixels) of an RGB image to W x H.
 function warp(rgb, sw, sh, corners) {
   const dst = [[0, 0], [W, 0], [W, H], [0, H]];
   const m = homography(dst, corners); // maps output pixel -> source pixel
+  // A card bigger than the output (held up to the camera): average a few samples per pixel.
+  const big = Math.hypot(corners[1][0] - corners[0][0], corners[1][1] - corners[0][1]) / W;
+  const taps = big > 2.5 ? 3 : big > 1.4 ? 2 : 1;
   const out = Buffer.alloc(W * H * 3);
+  const acc = [0, 0, 0];
   for (let y = 0; y < H; y++) {
     for (let x = 0; x < W; x++) {
-      const px = x + 0.5;
-      const py = y + 0.5;
-      const d = m[6] * px + m[7] * py + m[8];
-      const sx = (m[0] * px + m[1] * py + m[2]) / d - 0.5;
-      const sy = (m[3] * px + m[4] * py + m[5]) / d - 0.5;
-      const x0 = Math.max(0, Math.min(sw - 1, Math.floor(sx)));
-      const y0 = Math.max(0, Math.min(sh - 1, Math.floor(sy)));
-      const x1 = Math.min(sw - 1, x0 + 1);
-      const y1 = Math.min(sh - 1, y0 + 1);
-      const fx = Math.max(0, Math.min(1, sx - x0));
-      const fy = Math.max(0, Math.min(1, sy - y0));
+      acc[0] = 0; acc[1] = 0; acc[2] = 0;
+      for (let ty = 0; ty < taps; ty++) {
+        for (let tx = 0; tx < taps; tx++) {
+          const px = x + (tx + 0.5) / taps;
+          const py = y + (ty + 0.5) / taps;
+          const d = m[6] * px + m[7] * py + m[8];
+          sampleInto(acc, rgb, sw, sh, (m[0] * px + m[1] * py + m[2]) / d - 0.5, (m[3] * px + m[4] * py + m[5]) / d - 0.5);
+        }
+      }
       const o = (y * W + x) * 3;
+      const n = taps * taps;
+      out[o] = acc[0] / n;
+      out[o + 1] = acc[1] / n;
+      out[o + 2] = acc[2] / n;
+    }
+  }
+  return out;
+}
+
+// ---------- low-resolution comparison ----------
+// Integral images of an RGB picture, for fast box averages.
+function integral(rgb, w, h) {
+  const S = [0, 1, 2].map(() => new Float64Array((w + 1) * (h + 1)));
+  const W1 = w + 1;
+  for (let y = 0; y < h; y++) {
+    let r = 0;
+    let g = 0;
+    let b = 0;
+    for (let x = 0; x < w; x++) {
+      const i = (y * w + x) * 3;
+      r += rgb[i];
+      g += rgb[i + 1];
+      b += rgb[i + 2];
+      const o = (y + 1) * W1 + x + 1;
+      S[0][o] = S[0][o - W1] + r;
+      S[1][o] = S[1][o - W1] + g;
+      S[2][o] = S[2][o - W1] + b;
+    }
+  }
+  return { S, w, h };
+}
+
+// The picture with a share trimmed off each side, shrunk to LW x LH; optionally turned upside down.
+function shrink(I, l = 0, t = 0, r = 0, b = 0, flip = false) {
+  const out = new Float32Array(LW * LH * 3);
+  const x0 = l * I.w;
+  const y0 = t * I.h;
+  const sx = (I.w * (1 - l - r)) / LW;
+  const sy = (I.h * (1 - t - b)) / LH;
+  const W1 = I.w + 1;
+  for (let y = 0; y < LH; y++) {
+    const ya = Math.round(y0 + y * sy);
+    const yb = Math.max(ya + 1, Math.round(y0 + (y + 1) * sy));
+    for (let x = 0; x < LW; x++) {
+      const xa = Math.round(x0 + x * sx);
+      const xb = Math.max(xa + 1, Math.round(x0 + (x + 1) * sx));
+      const area = (xb - xa) * (yb - ya);
+      const o = (flip ? (LH - 1 - y) * LW + (LW - 1 - x) : y * LW + x) * 3;
       for (let c = 0; c < 3; c++) {
-        const a = rgb[(y0 * sw + x0) * 3 + c];
-        const bq = rgb[(y0 * sw + x1) * 3 + c];
-        const cq = rgb[(y1 * sw + x0) * 3 + c];
-        const dq = rgb[(y1 * sw + x1) * 3 + c];
-        out[o + c] = (a * (1 - fx) + bq * fx) * (1 - fy) + (cq * (1 - fx) + dq * fx) * fy;
+        out[o + c] = (I.S[c][yb * W1 + xb] - I.S[c][ya * W1 + xb] - I.S[c][yb * W1 + xa] + I.S[c][ya * W1 + xa]) / area;
       }
     }
   }
   return out;
 }
 
-// Order 4 points clockwise (on screen), starting nearest the top-left.
-function sortCorners(pts) {
-  const [cx, cy] = centre(pts);
-  const cw = [...pts].sort((a, b) => Math.atan2(a[1] - cy, a[0] - cx) - Math.atan2(b[1] - cy, b[0] - cx));
-  const start = cw.reduce((best, p, i) => (p[0] + p[1] < cw[best][0] + cw[best][1] ? i : best), 0);
-  return [0, 1, 2, 3].map((k) => cw[(start + k) % 4]);
-}
-
-function insideQuad([px, py], quad) {
-  let inside = false;
-  for (let i = 0, j = 3; i < 4; j = i++) {
-    const [xi, yi] = quad[i];
-    const [xj, yj] = quad[j];
-    if ((yi > py) !== (yj > py) && px < ((xj - xi) * (py - yi)) / (yj - yi) + xi) inside = !inside;
+// What gets compared: each colour with its average removed (so overall brightness and tint don't
+// matter), plus the brightness of each pixel against its neighbourhood (which survives glare and
+// washed-out exposure). The two halves weigh the same; the whole is a unit vector.
+function lowFeature(small) {
+  const out = new Float32Array(LOW);
+  let k = 0;
+  for (let c = 0; c < 3; c++) {
+    let sum = 0;
+    const start = k;
+    for (let y = LM; y < LH - LM; y++) {
+      for (let x = LM; x < LW - LM; x++) {
+        const v = small[(y * LW + x) * 3 + c];
+        out[k++] = v;
+        sum += v;
+      }
+    }
+    const mean = sum / LN;
+    for (let i = start; i < k; i++) out[i] -= mean;
   }
-  return inside;
+  let norm = 0;
+  for (let i = 0; i < k; i++) norm += out[i] * out[i];
+  norm = Math.sqrt(norm * 2) || 1;
+  for (let i = 0; i < k; i++) out[i] /= norm;
+
+  const gray = new Float32Array(LW * LH);
+  for (let i = 0; i < gray.length; i++) gray[i] = small[i * 3] * 0.3 + small[i * 3 + 1] * 0.59 + small[i * 3 + 2] * 0.11;
+  const R = 3;
+  norm = 0;
+  for (let y = LM; y < LH - LM; y++) {
+    for (let x = LM; x < LW - LM; x++) {
+      let s = 0;
+      let ss = 0;
+      let n = 0;
+      for (let yy = Math.max(0, y - R); yy <= Math.min(LH - 1, y + R); yy++) {
+        for (let xx = Math.max(0, x - R); xx <= Math.min(LW - 1, x + R); xx++) {
+          const v = gray[yy * LW + xx];
+          s += v;
+          ss += v * v;
+          n++;
+        }
+      }
+      const mean = s / n;
+      const v = (gray[y * LW + x] - mean) / (Math.sqrt(Math.max(0, ss / n - mean * mean)) + 8);
+      out[k++] = v;
+      norm += v * v;
+    }
+  }
+  norm = Math.sqrt(norm * 2) || 1;
+  for (let i = 3 * LN; i < k; i++) out[i] /= norm;
+  return out;
 }
 
 // ---------- corner finding ----------
-// Run the corner model on a region of the image; returns cards with corners in full-image pixels.
-async function runPose(rgb, sw, sh, region = { left: 0, top: 0, width: sw, height: sh }) {
-  const { pose } = await getSessions();
-  const resized = await sharp(rgb, { raw: { width: sw, height: sh, channels: 3 } })
-    .extract(region)
-    .resize(POSE_SIZE, POSE_SIZE, { fit: 'fill', kernel: 'linear' })
-    .raw()
-    .toBuffer();
-  const plane = POSE_SIZE * POSE_SIZE;
-  const data = new Float32Array(3 * plane);
-  for (let i = 0; i < plane; i++) for (let c = 0; c < 3; c++) data[c * plane + i] = resized[i * 3 + c] / 255;
-  const out = await pose.run({ image: new ort.Tensor('float32', data, [1, 3, POSE_SIZE, POSE_SIZE]) });
-  const scores = out.scores.data;
-  const kps = out.keypoints.data;
-  const found = [];
-  for (let q = 0; q < scores.length; q++) {
-    const score = 1 / (1 + Math.exp(-scores[q]));
-    if (score < 0.3) continue;
-    const quad = [0, 1, 2, 3].map((k) => [
-      region.left + kps[(q * 4 + k) * 2] * region.width,
-      region.top + kps[(q * 4 + k) * 2 + 1] * region.height,
-    ]);
-    found.push({ score, quad });
-  }
-  return found;
+// Squash a frame of the picture (a rotated rectangle, see cardfind.js) to the model's square input
+// and run it. Returns the model's cards with corners in picture pixels.
+function poseRunner(rgb, sw, sh) {
+  return (f) => serial(async () => {
+    const { pose } = await getSessions();
+    const o = CF.fromFrame(f, 0, 0);
+    const px = CF.fromFrame(f, 1, 0);
+    const py = CF.fromFrame(f, 0, 1);
+    const ax = (px[0] - o[0]) / POSE_SIZE;
+    const ay = (px[1] - o[1]) / POSE_SIZE;
+    const bx = (py[0] - o[0]) / POSE_SIZE;
+    const by = (py[1] - o[1]) / POSE_SIZE;
+    const plane = POSE_SIZE * POSE_SIZE;
+    const data = new Float32Array(3 * plane);
+    const taps = Math.max(f.w, f.h) / POSE_SIZE > 1.5 ? 2 : 1;
+    const k = 255 * taps * taps;
+    const acc = [0, 0, 0];
+    for (let y = 0; y < POSE_SIZE; y++) {
+      for (let x = 0; x < POSE_SIZE; x++) {
+        acc[0] = 0; acc[1] = 0; acc[2] = 0;
+        for (let ty = 0; ty < taps; ty++) {
+          for (let tx = 0; tx < taps; tx++) {
+            const u = x + (tx + 0.5) / taps;
+            const v = y + (ty + 0.5) / taps;
+            sampleInto(acc, rgb, sw, sh, o[0] + ax * u + bx * v - 0.5, o[1] + ay * u + by * v - 0.5);
+          }
+        }
+        const i = y * POSE_SIZE + x;
+        data[i] = acc[0] / k;
+        data[plane + i] = acc[1] / k;
+        data[2 * plane + i] = acc[2] / k;
+      }
+    }
+    const out = await pose.run({ image: new ort.Tensor('float32', data, [1, 3, POSE_SIZE, POSE_SIZE]) });
+    const found = [];
+    for (let q = 0; q < out.scores.data.length; q++) {
+      const score = 1 / (1 + Math.exp(-out.scores.data[q]));
+      if (score < 0.2) continue;
+      const quad = [0, 1, 2, 3].map((c) => CF.fromFrame(f, out.keypoints.data[(q * 4 + c) * 2], out.keypoints.data[(q * 4 + c) * 2 + 1]));
+      found.push({ score, quad });
+    }
+    return found;
+  });
 }
 
-const centre = (quad) => [quad.reduce((s, p) => s + p[0], 0) / 4, quad.reduce((s, p) => s + p[1], 0) / 4];
-
-// The outline found is often the sleeve, with a dark border around the card. Also try the outline
-// pulled in a little on every side, and keep whichever matches better.
-const INSETS = (process.env.RECOG_INSETS || '0').split(',').map(Number);
-function inset(quad, f) {
-  if (!f) return quad;
-  const [cx, cy] = centre(quad);
-  // Pull each corner towards the centre; for a rectangle this trims the same share off each side.
-  return quad.map(([x, y]) => [x + (cx - x) * f * 2, y + (cy - y) * f * 2]);
-}
-
-// How card-like a quad is: 1 for a perfect 63x88 rectangle, lower for odd shapes.
-function shapeScore(quad) {
-  const c = sortCorners(quad);
-  const len = (p, q) => Math.hypot(p[0] - q[0], p[1] - q[1]);
-  const s = [len(c[0], c[1]), len(c[1], c[2]), len(c[2], c[3]), len(c[3], c[0])];
-  const sideA = (s[0] + s[2]) / 2;
-  const sideB = (s[1] + s[3]) / 2;
-  if (!sideA || !sideB) return 0;
-  const parallel = Math.min(s[0], s[2]) / Math.max(s[0], s[2]) * (Math.min(s[1], s[3]) / Math.max(s[1], s[3]));
-  const aspect = Math.min(sideA, sideB) / Math.max(sideA, sideB);
-  // Bare cards are 0.72 wide-to-tall; sleeved ones a bit squarer (the outline is often the sleeve).
-  return parallel * Math.max(0, 1 - Math.max(0, Math.abs(aspect - 0.75) - 0.08) * 4);
-}
-
-export async function findCard(rgb, sw, sh, hint) {
-  const hintPx = [hint.x * sw, hint.y * sh];
-  // Prefer the card under the click, then the best-shaped, then the most confident.
-  const rank = (list) => list
-    .map((f) => ({ ...f, under: insideQuad(hintPx, f.quad), shape: shapeScore(f.quad) }))
-    .sort((a, b) => (b.under - a.under) || (b.shape * b.score - a.shape * a.score));
-  let found = rank(await runPose(rgb, sw, sh));
-
-  // No card, or a lopsided one: look again with the picture turned around, and zoomed in on the click.
-  if (!found[0] || !found[0].under || found[0].shape < 0.75) {
-    const flipped = await sharp(rgb, { raw: { width: sw, height: sh, channels: 3 } }).rotate(180).raw().toBuffer();
-    const more = (await runPose(flipped, sw, sh)).map((f) => ({ ...f, quad: f.quad.map(([x, y]) => [sw - x, sh - y]) }));
-    const zoom = async ([cx, cy], frac) => {
-      const side = Math.round(Math.min(sw, sh) * frac);
-      const left = Math.round(Math.max(0, Math.min(sw - side, cx - side / 2)));
-      const top = Math.round(Math.max(0, Math.min(sh - side, cy - side / 2)));
-      more.push(...await runPose(rgb, sw, sh, { left, top, width: side, height: side }));
-    };
-    await zoom(hintPx, 0.7);
-    found = rank([...found, ...more]);
-  }
-  if (found.length === 0) return null;
-  return { score: found[0].score, quad: found[0].quad, underClick: found[0].under, shape: found[0].shape };
-}
-
-// The card may be upright, tapped either way or upside down: try all four turns.
-// (A wrong turn squashes the card, so it never wins against the right one.)
-function orientations(quad) {
-  const c = sortCorners(quad);
-  return [0, 1, 2, 3].map((r) => [0, 1, 2, 3].map((k) => c[(k + r) % 4]));
+// The card under `hint` ({x, y} in 0-1 of the picture). size: its likely short side in pixels, if known.
+export function findCard(rgb, sw, sh, hint, size = 0) {
+  return CF.locate(poseRunner(rgb, sw, sh), [hint.x * sw, hint.y * sh], {
+    span: Math.min(sw, sh), bounds: [sw, sh], size, maxRuns: 14,
+  });
 }
 
 // ---------- reference cards ----------
-// A player's copy can be any printing, so every artwork of each deck card gets a reference vector
-// (the deck's own printing first). Artwork lists are cached in data/arts.json.
+// A player's copy can be any printing, so every different-looking printing of each deck card gets
+// a reference (the deck's own printings first). Printing lists are cached in data/arts.json:
+// name -> { at, complete, list: [{ key, small, normal }] }.
 const ARTS_FILE = path.join(DATA_DIR, 'arts.json');
-const MAX_ARTS = 16;
+const ARTS_MAX_AGE = 30 * 24 * 3600_000; // look for new printings once a month
+const ARTS_RETRY = 3600_000; // after Scryfall couldn't be reached
 let arts = {};
-try { arts = JSON.parse(fs.readFileSync(ARTS_FILE, 'utf8')); } catch { /* none yet */ }
+try {
+  const saved = JSON.parse(fs.readFileSync(ARTS_FILE, 'utf8'));
+  // Lists saved by earlier versions (plain arrays) missed alternate frames: fetch those again.
+  for (const [name, v] of Object.entries(saved)) arts[name] = Array.isArray(v) ? { at: 0, complete: false, list: v } : v;
+} catch { /* none yet */ }
+let artsTimer = null;
+function saveArts() {
+  artsTimer ??= setTimeout(() => {
+    artsTimer = null;
+    const tmp = `${ARTS_FILE}.tmp`;
+    fs.writeFile(tmp, JSON.stringify(arts), (err) => { if (!err) fs.rename(tmp, ARTS_FILE, () => {}); });
+  }, 2000);
+}
+
 const toIndex = new Map(); // card name -> card, waiting for the background indexer
 let indexing = null;
 
-// The embedder is very sensitive to sharpness: a card 160 px wide on camera scores poorly against
-// a crisp Scryfall scan. So each artwork is also stored as it would look at a few camera sizes,
-// and a lookup compares against the size closest to how big the card appears.
-const SIZES = [
-  { id: 's110', width: 110, blur: 0 },
-  { id: 's160', width: 160, blur: 0.8 },
-  { id: 's220', width: 220, blur: 0.6 },
-  { id: 'full', width: 0, blur: 0 },
-];
-const sizeFor = (cardWidth) => (cardWidth < 135 ? 's110' : cardWidth < 190 ? 's160' : cardWidth < 270 ? 's220' : 'full');
-const refKey = (art, size) => `${art.key}@${size}`;
-
 const okImage = (u) => typeof u === 'string' && u.startsWith('https://cards.scryfall.io/');
-const indexed = (card) => arts[card.name]?.every((a) => SIZES.every((s) => embeddings.has(refKey(a, s.id))));
+const listFresh = (entry) => entry && Date.now() - entry.at < (entry.complete ? ARTS_MAX_AGE : ARTS_RETRY);
+// The printings a deck card was loaded as (the deck list may name several).
+const ownPrints = (card) => [card, ...(card.prints || [])]
+  .filter((p) => p.scryfallId && okImage(p.imageLarge))
+  .map((p) => ({ key: `${p.scryfallId}/0`, small: p.image, normal: p.imageLarge }));
+const indexed = (card) => {
+  const entry = arts[card.name];
+  return listFresh(entry) && entry.list.every((a) => refs.has(a.key)) && ownPrints(card).every((a) => refs.has(a.key));
+};
 
 async function indexArt(art) {
   const res = await fetch(art.normal, { headers: { 'User-Agent': 'MTGTable/0.1 (private game table)' } });
   if (!res.ok) throw new Error(`image ${res.status}`);
-  const base = await sharp(Buffer.from(await res.arrayBuffer())).removeAlpha().resize(W, H, { fit: 'fill' }).toBuffer();
-  for (const size of SIZES) {
-    if (embeddings.has(refKey(art, size.id))) continue;
-    let img = sharp(base);
-    if (size.width) img = sharp(await sharp(base).resize(size.width).toBuffer()).resize(W, H, { fit: 'fill' });
-    if (size.blur) img = img.blur(size.blur);
-    const rgb = await img.removeAlpha().raw().toBuffer();
-    embeddings.set(refKey(art, size.id), await serial(() => embedRgb(rgb)));
-  }
+  const base = await sharp(Buffer.from(await res.arrayBuffer())).removeAlpha().resize(W, H, { fit: 'fill' }).png().toBuffer();
+  const pictures = [];
+  for (const make of RENDITIONS) pictures.push(await (await make(sharp(base), base)).removeAlpha().raw().toBuffer());
+  const emb = await serial(() => embedRgb(pictures), false);
+  const ref = { emb, low: lowFeature(shrink(integral(pictures[0], W, H))) };
+  refs.set(art.key, ref);
+  appendCache(art.key, ref);
 }
 
-async function indexOne(card) {
-  if (!arts[card.name]) {
-    const own = okImage(card.imageLarge) ? [{ key: `${card.scryfallId}/0`, small: card.image, normal: card.imageLarge }] : [];
-    let more = [];
-    try { more = await artworks(card.name, MAX_ARTS); } catch { /* offline: own printing only */ }
-    const list = [...own, ...more].filter((x, i, all) => okImage(x.normal) && all.findIndex((y) => y.key === x.key) === i);
-    arts[card.name] = list.slice(0, MAX_ARTS + 1);
-    fs.writeFile(ARTS_FILE, JSON.stringify(arts), () => {});
+// Make sure the card's list of printings is there and current. The deck's own printings go first.
+async function listArts(card) {
+  let entry = arts[card.name];
+  if (!listFresh(entry)) {
+    let more = null;
+    try { more = await artworks(card.name); } catch { /* Scryfall unreachable: try again later */ }
+    const list = [...(entry?.list || []), ...(more || [])].filter((x, i, all) => okImage(x.normal) && all.findIndex((y) => y.key === x.key) === i);
+    entry = { at: Date.now(), complete: !!more, list };
+    arts[card.name] = entry;
+    saveArts();
   }
-  for (const art of arts[card.name]) {
-    if (SIZES.every((s) => embeddings.has(refKey(art, s.id)))) continue;
+  const own = ownPrints(card).filter((a) => !entry.list.some((b) => b.key === a.key));
+  if (own.length) {
+    entry.list.unshift(...own);
+    saveArts();
+  }
+  return entry.list;
+}
+
+async function indexSome(card, list) {
+  for (const art of list) {
+    if (refs.has(art.key)) continue;
     try {
       await indexArt(art);
-      cacheDirty = true;
     } catch (err) {
       console.warn('Could not index', card.name, err.message);
     }
@@ -331,22 +465,31 @@ async function indexOne(card) {
   }
 }
 
+// First the deck's own printing of every card (so a new deck is usable within a minute), then the rest.
 async function runIndexer() {
-  let n = 0;
+  const later = [];
   while (toIndex.size) {
     const [name, card] = toIndex.entries().next().value;
-    await indexOne(card);
+    const list = await listArts(card);
+    const own = ownPrints(card).map((a) => a.key);
+    const first = list.filter((a) => own.includes(a.key));
+    await indexSome(card, first.length ? first : list.slice(0, 1));
+    later.push(card);
     toIndex.delete(name);
-    if (++n % 10 === 0) saveCache();
   }
-  saveCache();
+  for (const card of later) await indexSome(card, arts[card.name]?.list || []);
 }
 
 // Queue cards for indexing in the background (after a deck loads, and at startup). Resolves when done.
 export function indexCards(cards) {
   if (!modelsAvailable()) return Promise.resolve();
   for (const card of cards) if (card?.name && !indexed(card)) toIndex.set(card.name, card);
-  if (!indexing) indexing = runIndexer().finally(() => { indexing = null; });
+  if (!indexing) {
+    indexing = runIndexer().finally(() => {
+      indexing = null;
+      if (toIndex.size) indexCards([]); // queued while the second pass was running
+    });
+  }
   return indexing;
 }
 
@@ -354,87 +497,229 @@ export function indexStatus() {
   return { waiting: toIndex.size };
 }
 
-// While tuning: keep the last few lookups (crop, straightened card, top matches) in data/identify-debug.
-const DEBUG_DIR = process.env.RECOG_DEBUG === '0' ? null : path.join(DATA_DIR, 'identify-debug');
-async function saveDebug(image, warps, card, top) {
-  const dir = path.join(DEBUG_DIR, new Date().toISOString().replace(/[:.]/g, '-'));
-  fs.mkdirSync(dir, { recursive: true });
-  fs.writeFileSync(path.join(dir, 'crop.jpg'), image);
-  for (let i = 0; i < warps.length; i++) {
-    await sharp(warps[i], { raw: { width: W, height: H, channels: 3 } }).jpeg().toFile(path.join(dir, `turn${i}.jpg`));
+// ---------- capture log ----------
+// Every lookup is kept (the crop, what was found, and afterwards what the player picked) so
+// recognition can be measured on real pictures: `node scripts/recog-replay.js`. The newest
+// RECOG_LOG_MAX are kept (default 400, about 60 MB; 0 turns the log off).
+const LOG_DIR = path.join(DATA_DIR, 'identify-log');
+const LOG_MAX = process.env.RECOG_LOG_MAX === undefined ? 400 : Math.max(0, Number(process.env.RECOG_LOG_MAX) || 0);
+
+function saveCapture(image, record) {
+  if (!LOG_MAX) return null;
+  const id = `${new Date().toISOString().replace(/[:.]/g, '-')}-${Math.random().toString(36).slice(2, 6)}`;
+  try {
+    const dir = path.join(LOG_DIR, id);
+    fs.mkdirSync(dir, { recursive: true });
+    fs.writeFile(path.join(dir, 'crop.jpg'), image, () => {});
+    fs.writeFile(path.join(dir, 'result.json'), JSON.stringify(record), () => {});
+    const old = fs.readdirSync(LOG_DIR).sort().slice(0, -LOG_MAX);
+    for (const d of old) fs.rm(path.join(LOG_DIR, d), { recursive: true, force: true }, () => {});
+  } catch (err) {
+    console.warn('Could not log the lookup:', err.message);
+    return null;
   }
-  fs.writeFileSync(path.join(dir, 'result.json'), JSON.stringify({
-    cardScore: card.score, underClick: card.underClick, quad: card.quad, size: card.size, cardWidth: card.cardWidth,
-    top: top.map((m) => ({ name: m.card.name, score: m.score, art: m.card.imageLarge })),
-  }, null, 1));
-  const old = fs.readdirSync(DEBUG_DIR).sort().slice(0, -20);
-  for (const d of old) fs.rmSync(path.join(DEBUG_DIR, d), { recursive: true, force: true });
+  return id;
 }
+
+// What the player did with a lookup: label = { name (the card it really was, or null), how, by }.
+export function labelCapture(id, label) {
+  if (!/^[\w-]{10,60}$/.test(String(id))) return false;
+  const dir = path.join(LOG_DIR, id);
+  if (!fs.existsSync(path.join(dir, 'result.json'))) return false;
+  fs.writeFile(path.join(dir, 'label.json'), JSON.stringify(label), () => {});
+  return true;
+}
+
+// ---------- matching ----------
+const TRIMS = [0, 0.08, 0.16]; // shares trimmed off a side, coarse pass
+const FINE = [-0.04, 0, 0.04]; // then around the best
+const LIKELY = 24; // reference pictures that get the trimming search
+const BACKGROUND = 1500; // other reference pictures used to judge what an ordinary score is
+// Sure enough to say "Match": this far above the other pictures, and this far ahead of the next card.
+// (On real lookups: right answers were 5.6-11.3 with the next card 2.5+ behind in all but 2 of 17;
+// wrong answers, and cards that aren't in any deck, had the next card within 1.7.)
+const SURE_SCORE = 5.5;
+const SURE_MARGIN = 2;
+
+const stats = (v) => {
+  let sum = 0;
+  for (const x of v) sum += x;
+  const mean = sum / v.length;
+  let sq = 0;
+  for (const x of v) sq += (x - mean) ** 2;
+  return { mean, sd: Math.sqrt(sq / v.length) || 1 };
+};
+
+// The corners of the card after trimming shares off the sides of the outline u ([TL,TR,BR,BL]).
+function trimQuad(u, l, t, r, b) {
+  const pt = (x, y) => {
+    const top = [u[0][0] + (u[1][0] - u[0][0]) * x, u[0][1] + (u[1][1] - u[0][1]) * x];
+    const bot = [u[3][0] + (u[2][0] - u[3][0]) * x, u[3][1] + (u[2][1] - u[3][1]) * x];
+    return [top[0] + (bot[0] - top[0]) * y, top[1] + (bot[1] - top[1]) * y];
+  };
+  return [pt(l, t), pt(1 - r, t), pt(1 - r, 1 - b), pt(l, 1 - b)];
+}
+
+// Compare the card inside `quad` with the candidates' reference pictures.
+// Returns [{ card, owner, score, emb, low }] best first, one per card name; score is how far the
+// card stands out from the other reference pictures (embedder + low-res, in standard deviations).
+async function matchCard(rgb, sw, sh, quad, candidates) {
+  // The outline's long sides are the card's; it may still be upside down, so both ways are compared.
+  const u = CF.uprightCorners(quad);
+  const upright = warp(rgb, sw, sh, u);
+  const turned = Buffer.alloc(upright.length);
+  for (let i = 0, j = W * H - 1; i < W * H; i++, j--) {
+    turned[j * 3] = upright[i * 3];
+    turned[j * 3 + 1] = upright[i * 3 + 1];
+    turned[j * 3 + 2] = upright[i * 3 + 2];
+  }
+  const vectors = await serial(() => embedRgb([upright, turned]));
+  const I = integral(upright, W, H);
+  const plain = [lowFeature(shrink(I)), lowFeature(shrink(I, 0, 0, 0, 0, true))];
+
+  // Reference pictures to compare with: the candidates', plus others to judge the scores against.
+  const pool = []; // { ref, name?, card?, owner?, art? }
+  const seen = new Set();
+  for (const { card, owner } of candidates) {
+    if (seen.has(card.name)) continue;
+    seen.add(card.name);
+    for (const art of arts[card.name]?.list || []) {
+      const ref = refs.get(art.key);
+      if (ref) pool.push({ ref, name: card.name, card, owner, art });
+    }
+  }
+  const mine = pool.length;
+  if (!mine) return [];
+  const used = new Set(pool.map((p) => p.ref));
+  const step = Math.max(1, Math.floor(refs.size / BACKGROUND));
+  let n = 0;
+  for (const ref of refs.values()) if (n++ % step === 0 && !used.has(ref)) pool.push({ ref });
+
+  const emb = new Float32Array(pool.length);
+  const low = new Float32Array(pool.length);
+  pool.forEach((p, i) => {
+    let e = -1;
+    for (const v of vectors) for (const r of p.ref.emb) e = Math.max(e, dot(v, r));
+    emb[i] = e;
+    low[i] = Math.max(dot(plain[0], p.ref.low), dot(plain[1], p.ref.low));
+  });
+  const lowStats = stats(low); // before trimming: trimming only lifts the likely ones
+  let embStats = stats(emb);
+
+  // Trimming search for the likeliest candidates: coarse over all four sides, then fine around the best.
+  const likely = [...Array(mine).keys()]
+    .sort((a, b) => ((emb[b] - embStats.mean) / embStats.sd + (low[b] - lowStats.mean) / lowStats.sd) - ((emb[a] - embStats.mean) / embStats.sd + (low[a] - lowStats.mean) / lowStats.sd))
+    .slice(0, LIKELY);
+  const features = new Map();
+  const featureAt = (flip, l, t, r, b) => {
+    const key = `${flip}|${l.toFixed(2)}|${t.toFixed(2)}|${r.toFixed(2)}|${b.toFixed(2)}`;
+    let f = features.get(key);
+    if (!f) features.set(key, f = lowFeature(shrink(I, l, t, r, b, !!flip)));
+    return f;
+  };
+  let fit = null; // the best trim over all likely candidates
+  const fitOf = new Map(); // pool index -> its best { s, flip, l, t, r, b }
+  for (const flip of [0, 1]) {
+    for (const l of TRIMS) for (const t of TRIMS) for (const r of TRIMS) for (const b of TRIMS) {
+      const f = featureAt(flip, l, t, r, b);
+      for (const i of likely) {
+        const s = dot(f, pool[i].ref.low);
+        if (!(fitOf.get(i)?.s >= s)) fitOf.set(i, { s, flip, l, t, r, b });
+      }
+    }
+  }
+  for (const i of [...fitOf.keys()].sort((a, b) => fitOf.get(b).s - fitOf.get(a).s).slice(0, 6)) {
+    const c = fitOf.get(i);
+    let best = c;
+    for (const dl of FINE) for (const dt of FINE) for (const dr of FINE) for (const db of FINE) {
+      const [l, t, r, b] = [c.l + dl, c.t + dt, c.r + dr, c.b + db];
+      if (l < 0 || t < 0 || r < 0 || b < 0 || (!dl && !dt && !dr && !db)) continue;
+      const s = dot(featureAt(c.flip, l, t, r, b), pool[i].ref.low);
+      if (s > best.s) best = { s, flip: c.flip, l, t, r, b };
+    }
+    fitOf.set(i, best);
+  }
+  for (const [i, c] of fitOf) {
+    if (c.s > low[i]) low[i] = c.s;
+    if (!fit || c.s > fit.s) fit = c;
+  }
+  // The embedder gets a second go at the best-fitting trim.
+  if (fit && (fit.l || fit.t || fit.r || fit.b)) {
+    const again = warp(rgb, sw, sh, trimQuad(fit.flip ? [u[2], u[3], u[0], u[1]] : u, fit.l, fit.t, fit.r, fit.b));
+    const [v] = await serial(() => embedRgb([again]));
+    pool.forEach((p, i) => { for (const r of p.ref.emb) emb[i] = Math.max(emb[i], dot(v, r)); });
+    embStats = stats(emb);
+  }
+
+  const best = new Map(); // name -> its best reference
+  for (let i = 0; i < mine; i++) {
+    const p = pool[i];
+    const score = (emb[i] - embStats.mean) / embStats.sd + (low[i] - lowStats.mean) / lowStats.sd;
+    if (!(best.get(p.name)?.score >= score)) best.set(p.name, { ...p, score, emb: emb[i], low: low[i] });
+  }
+  return [...best.values()].sort((a, b) => b.score - a.score).map(({ card, owner, art, score, emb: e, low: l }) => ({
+    // Show the printing that matched, so a sticker looks like the card on the table.
+    card: { ...card, image: art.small || card.image, imageLarge: art.normal }, owner, score, emb: e, low: l,
+  }));
+}
+
+const margin = (m) => (m[0] ? m[0].score - (m[1]?.score ?? -Infinity) : 0);
 
 // ---------- identify ----------
 // image: JPEG/PNG buffer of the area around the click. hint: click position inside it (0-1).
 // candidates: [{ card, owner }] to match against (cards from the decks at the table).
-export async function identify(image, hint, candidates) {
+// opts.size: the card's likely short side as a share of the picture's width (from the browser's
+// card tracking), opts.log: false to keep this lookup out of the capture log, opts.note: extra
+// fields for the log (who asked, at which table).
+export async function identify(image, hint, candidates, opts = {}) {
   if (!modelsAvailable()) throw new Error('Recognition models are not installed on the server.');
   indexCards(candidates.map((c) => c.card)); // anything new gets learned in the background
   const { data: rgb, info } = await sharp(image).removeAlpha().raw().toBuffer({ resolveWithObject: true });
   const t0 = Date.now();
-  const card = await serial(() => findCard(rgb, info.width, info.height, hint));
-  if (!card) {
-    if (DEBUG_DIR) saveDebug(image, [], { score: 0, underClick: false, quad: [] }, []).catch(() => {});
-    return { found: false, ms: Date.now() - t0, waiting: toIndex.size };
-  }
+  const size = opts.size > 0.02 && opts.size < 0.9 ? opts.size * info.width : 0;
+  const spot = await findCard(rgb, info.width, info.height, hint, size);
+  const record = {
+    ...opts.note, hint, size: opts.size || 0, width: info.width, height: info.height,
+    candidates: [...new Set(candidates.map((c) => c.card.name))],
+  };
+  const log = (result, extra) => {
+    const id = opts.log === false ? null : saveCapture(image, { ...record, ...result, ...extra });
+    return id ? { ...result, id } : result;
+  };
+  if (!spot.card) return log({ found: false, runs: spot.runs, ms: Date.now() - t0, waiting: toIndex.size });
 
-  const vectors = [];
-  const warps = [];
-  for (const q of orientations(card.quad).flatMap((o) => INSETS.map((f) => inset(o, f)))) {
-    const warped = warp(rgb, info.width, info.height, q);
-    warps.push(warped);
-    vectors.push(await serial(() => embedRgb(warped)));
-  }
-
-  // How wide the card is on camera (its short side, in pixels) picks the reference size.
-  const [a, b, c2, d] = card.quad;
-  const len = (p, q) => Math.hypot(p[0] - q[0], p[1] - q[1]);
-  const cardWidth = Math.min(len(a, b) + len(c2, d), len(b, c2) + len(d, a)) / 2;
-  const size = sizeFor(cardWidth);
-
-  const seen = new Set();
-  const scored = [];
-  for (const { card: c, owner } of candidates) {
-    if (seen.has(c.name)) continue;
-    seen.add(c.name);
-    let best = null;
-    for (const art of arts[c.name] || []) {
-      const ref = embeddings.get(refKey(art, size));
-      if (!ref) continue;
-      const score = Math.max(...vectors.map((v) => dot(v, ref)));
-      if (!best || score > best.score) best = { score, art };
+  let card = spot.card;
+  let matches = await matchCard(rgb, info.width, info.height, card.quad, candidates);
+  // Not a clear answer and the model had another outline in mind: see if that one reads better.
+  const other = spot.others[0];
+  if (other && (margin(matches) < SURE_MARGIN || !spot.sure)) {
+    const second = await matchCard(rgb, info.width, info.height, other.quad, candidates);
+    if (second[0] && second[0].score > (matches[0]?.score ?? -Infinity)) {
+      matches = second;
+      card = other;
     }
-    // Show the printing that matched, so a sticker looks like the card on the table.
-    if (best) scored.push({ card: { ...c, image: best.art.small, imageLarge: best.art.normal }, owner, score: best.score });
   }
-  scored.sort((a, b) => b.score - a.score);
-  if (DEBUG_DIR) saveDebug(image, warps, { ...card, size, cardWidth }, scored.slice(0, 6)).catch(() => {});
-  return {
+  const top = matches[0];
+  const result = {
     found: true,
     cardScore: card.score,
-    underClick: card.underClick,
+    underClick: CF.insideQuad([hint.x * info.width, hint.y * info.height], card.quad),
     quad: card.quad.map(([x, y]) => [x / info.width, y / info.height]),
-    matches: scored.slice(0, 6),
-    cardWidth: Math.round(cardWidth),
-    size,
+    matches: matches.slice(0, 6).map((m) => ({ ...m, score: Math.round(m.score * 10) / 10 })),
+    confident: !!top && top.score >= SURE_SCORE && margin(matches) >= SURE_MARGIN,
+    // Nothing stands out: it may well not be in any loaded deck.
+    weak: !!top && margin(matches) < 1,
+    cardWidth: Math.round(card.a),
     waiting: toIndex.size,
+    runs: spot.runs,
     ms: Date.now() - t0,
   };
-}
-
-// For tests: embed a straightened card image directly.
-export async function embedImage(image) {
-  const rgb = await sharp(image).removeAlpha().resize(W, H, { fit: 'fill' }).raw().toBuffer();
-  return serial(() => embedRgb(rgb));
+  return log(result, {
+    sureOutline: spot.sure,
+    matches: matches.slice(0, 6).map((m) => ({ name: m.card.name, score: m.score, emb: m.emb, low: m.low, art: m.card.imageLarge })),
+  });
 }
 
 export function cacheSize() {
-  return embeddings.size;
+  return refs.size;
 }

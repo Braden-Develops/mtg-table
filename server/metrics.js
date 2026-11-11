@@ -15,7 +15,7 @@ const SAMPLE_MS = 15_000;
 const startedAt = Date.now();
 
 // ---------- counters ----------
-const counters = { identify: 0, decks: 0, invitesOpened: 0 };
+const counters = { identify: 0, identifySure: 0, identifyUnsure: 0, identifyNoCard: 0, decks: 0, invitesOpened: 0 };
 export function count(kind) {
   counters[kind] = (counters[kind] || 0) + 1;
 }
@@ -130,6 +130,8 @@ function render() {
   metric('mtg_players_online', 'gauge', 'Connections right now.', [[null, people.length]]);
   metric('mtg_tables_active', 'gauge', 'Tables with someone connected.', [[null, new Set(people.map((s) => s.room)).size]]);
   metric('mtg_card_identify_total', 'counter', 'Card recognition requests.', [[null, counters.identify]]);
+  metric('mtg_card_identify_result_total', 'counter', 'Card recognition answers: a sure match, a best guess, or no card found.',
+    [[{ result: 'match' }, counters.identifySure], [{ result: 'guess' }, counters.identifyUnsure], [{ result: 'no_card' }, counters.identifyNoCard]]);
   metric('mtg_decks_loaded_total', 'counter', 'Deck lists loaded.', [[null, counters.decks]]);
   metric('mtg_invites_opened_total', 'counter', 'Invite pages opened.', [[null, counters.invitesOpened]]);
   const net = traffic();

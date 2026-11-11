@@ -198,6 +198,15 @@ window.Game = (() => {
   // ---------- side panel ----------
   function wirePanel() {
     document.getElementById('pass-btn').addEventListener('click', () => act({ type: 'passTurn' }));
+    // Space passes the turn, on your own turn only (it's an easy key to hit by accident), and not
+    // while typing, in a dialog or menu, or held down.
+    document.addEventListener('keydown', (e) => {
+      if (e.code !== 'Space' || e.repeat || e.ctrlKey || e.metaKey || e.altKey) return;
+      if (e.target.closest?.('input, textarea, select, [contenteditable]')) return;
+      if (document.querySelector('dialog[open], .menu.open')) return;
+      e.preventDefault(); // no page scroll, and no re-click of whatever button was used last
+      if (state?.active === me) act({ type: 'passTurn' });
+    });
     document.getElementById('game-btn').addEventListener('click', () => {
       const panel = document.getElementById('game-panel');
       panel.hidden = !panel.hidden;
