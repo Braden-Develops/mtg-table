@@ -21,7 +21,8 @@
 // Set up from the host page (Discord bot section): application ID, public key, bot token, owner ID.
 // With OCI Vault in use the bot token goes to the vault and is only held in memory here.
 import crypto from 'node:crypto';
-import { CONFIG_FILE, inviteUrl, loadInvites, readJson, saveInvites, writeJson } from '../scripts/lib.js';
+import path from 'node:path';
+import { CONFIG_FILE, DATA_DIR, inviteUrl, loadInvites, readJson, saveInvites, writeJson } from '../scripts/lib.js';
 import { closeTable, inviteActive, makeInvite, online, overLimit, revokeInvite } from './host.js';
 import { SECRET_NAMES, UNSET, writeSecret } from './secrets.js';
 
@@ -219,17 +220,49 @@ const row = (...buttons) => ({ type: 1, components: buttons });
 // One timer per private message. Later clicks on the same message (picker -> result) replace the timer,
 // keyed by the interaction that first made the message. `sameMessage`: this interaction edited the message
 // its button was on (rather than replying with a new one).
-const fades = new Map();
-function fade(config, i, ms, sameMessage = true) {
-  const key = (sameMessage && (i.message?.interaction_metadata?.id || i.message?.interaction?.id)) || i.id;
-  clearTimeout(fades.get(key));
-  if (!ms) return fades.delete(key);
-  fades.set(key, setTimeout(() => {
+// Pending cleanups are also saved to disk so a restart (every deploy) doesn't leave messages behind.
+// Interaction tokens stop working 15 minutes after the click, so saved entries are short-lived.
+const FADES_FILE = path.join(DATA_DIR, 'discord-fades.json');
+const fades = new Map(); // key -> { timer, token, at }
+const saveFades = () => {
+  try {
+    writeJson(FADES_FILE, [...fades].map(([key, f]) => ({ key, token: f.token, at: f.at })));
+  } catch (err) {
+    console.warn(`Discord: could not save pending cleanups: ${err.message}`);
+  }
+};
+function scheduleFade(config, key, token, at) {
+  clearTimeout(fades.get(key)?.timer);
+  const timer = setTimeout(() => {
     fades.delete(key);
-    fetch(`${API}/webhooks/${settings(config).appId}/${i.token}/messages/@original`, {
+    saveFades();
+    fetch(`${API}/webhooks/${settings(config).appId}/${token}/messages/@original`, {
       method: 'DELETE', headers: { 'User-Agent': UA },
     }).catch(() => {});
-  }, Math.min(ms, TTL.link)).unref());
+  }, Math.max(0, at - Date.now()));
+  timer.unref?.();
+  fades.set(key, { timer, token, at });
+}
+function fade(config, i, ms, sameMessage = true) {
+  const key = (sameMessage && (i.message?.interaction_metadata?.id || i.message?.interaction?.id)) || i.id;
+  if (!ms) {
+    clearTimeout(fades.get(key)?.timer);
+    fades.delete(key);
+  } else {
+    scheduleFade(config, key, i.token, Date.now() + Math.min(ms, TTL.link));
+  }
+  saveFades();
+}
+// On start: pick up cleanups from before the restart (overdue ones run right away).
+function restoreFades(config) {
+  const saved = readJson(FADES_FILE, []);
+  if (!Array.isArray(saved) || !saved.length) return;
+  for (const f of saved) {
+    // Past the token's life (15 min from the click, and `at` is at most 14 min after it): give up.
+    if (f?.key && f.token && Date.now() - f.at < 2 * 60_000) scheduleFade(config, f.key, f.token, f.at);
+  }
+  saveFades();
+  if (fades.size) console.log(`Discord: picked up ${fades.size} pending message cleanup(s) from before the restart`);
 }
 const until = (inv) => (inv.expiresAt
   ? `works until <t:${Math.floor(Date.parse(inv.expiresAt) / 1000)}:f>`
@@ -598,6 +631,7 @@ async function syncBoardTopic(config) {
   if (ch.name === 'tables' && ch.topic !== BOARD_TOPIC) await discordApi(config, 'PATCH', `/channels/${b.channelId}`, { topic: BOARD_TOPIC });
 }
 export function startBoard(config) {
+  restoreFades(config);
   setInterval(() => refreshBoard(config).catch(() => {}), 15_000).unref();
   setTimeout(() => {
     refreshBoard(config, true).catch(() => {});
