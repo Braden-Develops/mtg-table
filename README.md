@@ -130,6 +130,27 @@ Handy queries: hours per player this month,
 `sum by (name) (increase(mtg_player_connected_seconds_total[30d])) / 3600`; who is on now,
 `mtg_player_session_seconds / 60`.
 
+### Oracle Cloud spend
+
+On the Oracle server (with the vault set up), `/metrics` also shows what the tenancy is costing,
+refreshed hourly: `oci_cost_month_to_date` and `oci_cost_month_to_date_by_service` (from the Usage
+API), and for each budget `oci_budget_amount`, `oci_budget_actual_spend` and
+`oci_budget_forecast_spend`. Oracle's figures run several hours behind (up to about a day), so treat
+them as "spend as of Oracle's last update". The VM only gets read access to cost and budgets. It
+can't change anything or see payment details.
+
+To switch it on, run [deploy/oci-vault-setup.sh](deploy/oci-vault-setup.sh) again in Cloud Shell. It
+adds the read-only `mtg-table-cost` policy. Pass `BUDGET` and `ALERT_EMAIL` to also create a monthly
+budget, which emails you at 50% and 100% of actual spend and when Oracle forecasts going over:
+
+    curl -fsSL https://raw.githubusercontent.com/Braden-Develops/mtg-table/main/deploy/oci-vault-setup.sh | BUDGET=10 ALERT_EMAIL=you@example.com bash
+
+Oracle sends those emails itself, so they arrive even if the VM is down. Then restart the app
+(`sudo systemctl restart mtg-table`). Until the policy exists the app logs
+`OCI cost (Usage API) unavailable` once and leaves the cost metrics out.
+
+Handy Grafana alert: `oci_cost_month_to_date > 0` (or above whatever you expect to pay).
+
 ## Discord bot
 
 Send invite links from Discord instead of the host page: right-click a friend > Apps >

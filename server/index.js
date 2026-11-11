@@ -18,6 +18,7 @@ import { autocomplete, namedCard } from './scryfall.js';
 import { allDeckCards, getDeck, loadDeck, removeDeck, roomDecks } from './decks.js';
 import { identify, indexCards, modelsAvailable } from './recognize.js';
 import { handleAccessLog, startAccessLog } from './accesslog.js';
+import { startCost } from './cost.js';
 import { count, handleMetrics, noteToken, startMetrics } from './metrics.js';
 import { clearDiscord, discordStatus, handleDiscord, registerCommands, removeHost, saveDiscord, startBoard } from './discord.js';
 import { loadSecrets } from './secrets.js';
@@ -481,6 +482,7 @@ if (config.discord?.appId && config.discord?.token) {
 }
 startBoard(config);
 startMetrics(config);
+startCost(config);
 if (config.metricsToken) startAccessLog();
 const onRequest = (req, res) => handle(req, res).catch((err) => {
   console.error(err);
