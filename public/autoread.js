@@ -1,7 +1,7 @@
 /* Read cards held up to the camera: hold a card up close and still for a moment, it's recognised,
    and when it's put down on the table a card sticker is put on it (which then follows it).
    Runs in the camera owner's browser:
-   - A tiny greyscale copy of the camera (96x54, 5 times a second) is compared with how the table
+   - A tiny greyscale copy of the camera (96x54, 8 times a second) is compared with how the table
      looked when nothing was moving. A big, steady change is something held up.
    - The corner model (Tracker's worker) checks it's a card, and a big one (held near the camera).
    - The server reads it (Identify), once per card held up.
@@ -11,14 +11,21 @@
 window.AutoRead = (() => {
   const W = 96;
   const H = 54;
-  const FPS = 5;
+  const FPS = 8;
   const DIFF = 22; // brightness change (0-255) that counts as changed
   // Frame-to-frame change (mean, 0-255) below this means nothing is moving. Cameras differ in noise,
   // so it is set from the quietest recent frames: at least CALM_MIN.
   const CALM_MIN = 2.2;
   const STEADY = 5; // a card held in a hand wobbles: this much more than calm still counts as held still
   const HELD_MIN = 0.3; // a held card's long side is at least this share of the picture's height
-  const READ_GAP_MS = 6000; // at most one read every 6 s (the server allows 20 a minute)
+  const READ_GAP_MS = 2500; // between reads of different cards
+  const READS_PER_MIN = 15; // the server allows 20 a minute per player
+  const readTimes = [];
+  const readsLastMinute = () => {
+    const now = performance.now();
+    while (readTimes.length && now - readTimes[0] > 60000) readTimes.shift();
+    return readTimes.length;
+  };
   const READS_PER_HOLD = 2;
   const LAND_WAIT_MS = 25000; // how long to wait for the card to be put down
 
@@ -175,7 +182,9 @@ window.AutoRead = (() => {
       last = { m: +m.toFixed(1), calm: +calm.toFixed(1), n: big ? +(big.n / (W * H)).toFixed(3) : 0, tall: +(tall || 0).toFixed(2), steadyFrames };
       if (isBig && tall > HELD_MIN * 0.9 && m < calm + STEADY) steadyFrames++;
       else steadyFrames = 0;
-      if (steadyFrames >= 3 && now >= nextCheck && now - lastRead >= READ_GAP_MS) check(video, big, now);
+      // Whatever was in front of the camera has gone: the next thing held up is looked at straight away.
+      if (!big || big.n < W * H * 0.02) { failedChecks = 0; nextCheck = 0; }
+      if (steadyFrames >= 3 && now >= nextCheck && now - lastRead >= READ_GAP_MS && readsLastMinute() < READS_PER_MIN - 1) check(video, big, now);
       return;
     }
     if (phase === 'held') {
@@ -189,7 +198,7 @@ window.AutoRead = (() => {
       const hy = hold.held.cy * H;
       const tall = Math.max(HELD_MIN, hold.held.b);
       if (vsBefore.some((p) => (p.y1 - p.y0 + 1) / H > tall && hx >= p.x0 - 1 && hx <= p.x1 + 1 && hy >= p.y0 - 1 && hy <= p.y1 + 1)) return;
-      if (calmFor < 1000 || hold.unsure) return;
+      if (calmFor < 700 || hold.unsure) return;
       busy = true;
       land(video, vsBefore).catch((err) => console.warn('Placing held card:', err)).finally(() => { busy = false; });
     }
@@ -247,7 +256,7 @@ window.AutoRead = (() => {
       if (!held) {
         // Probably a hand or an arm: look less often while it stays.
         failedChecks++;
-        nextCheck = performance.now() + Math.min(5000, 1200 * failedChecks);
+        nextCheck = performance.now() + Math.min(3000, 500 * failedChecks);
         return;
       }
       failedChecks = 0;
@@ -291,7 +300,7 @@ window.AutoRead = (() => {
     const aspect = video.videoWidth / video.videoHeight;
     const shortIsHeight = aspect >= 1;
     let result = null;
-    while (hold && hold.reads < READS_PER_HOLD) {
+    while (hold && hold.reads < READS_PER_HOLD && (hold.reads === 0 || readsLastMinute() < READS_PER_MIN)) {
       if (hold.reads) {
         // Second try: only if it's still held up, centred on where it is now.
         const again = await relocate(video, held);
@@ -305,9 +314,10 @@ window.AutoRead = (() => {
       const frac = Math.min(1, Math.max(0.5, crop.b * 1.8 * (shortIsHeight ? 1 : aspect)));
       hold.reads++;
       lastRead = performance.now();
+      readTimes.push(lastRead);
       result = await window.Identify.read(video, crop.cx, crop.cy, frac);
       if (result?.found && result.confident && result.matches?.[0]?.score >= SURE) break;
-      if (hold.reads < READS_PER_HOLD) await new Promise((r) => setTimeout(r, 1500));
+      if (hold.reads < READS_PER_HOLD) await new Promise((r) => setTimeout(r, 300));
     }
     if (!hold) return;
     const best = result?.matches?.[0];
