@@ -51,11 +51,18 @@ window.Identify = (() => {
     return { canvas, hx: (cx - left) / side, hy: (cy - top) / side, left, top, side, vw, vh };
   }
 
-  async function ask(video, x, y, player, frac, maxPx) {
+  // share: the card's width as a share of the crop's, if known (saves the server guessing its size).
+  async function ask(video, x, y, player, frac, maxPx, share) {
     const c = crop(video, x, y, frac, maxPx);
     if (!c) throw new Error('That video is not playing yet.');
     const blob = await new Promise((resolve) => c.canvas.toBlob(resolve, 'image/jpeg', 0.92));
     const q = new URLSearchParams({ code, player, x: c.hx.toFixed(4), y: c.hy.toFixed(4) });
+    // On my own camera, card tracking knows how big the cards on the table are.
+    if (!share && video === localVideo()) {
+      const len = window.Tracker?.cardSize?.(); // a card's length, share of the picture's height
+      if (len) share = (len * 0.716 * c.vh) / c.side;
+    }
+    if (share > 0.02 && share < 0.9) q.set('s', share.toFixed(3));
     const res = await fetch(`/api/identify?${q}`, { method: 'POST', headers: { 'Content-Type': 'image/jpeg' }, body: blob });
     const data = await res.json();
     if (!res.ok) throw new Error(data.error || 'Recognition failed.');
@@ -69,6 +76,15 @@ window.Identify = (() => {
   }
 
   const localVideo = () => document.querySelector('.tile[data-local="1"] video');
+
+  // Tell the server what a lookup turned out to be (name, or null for "none of these"), so
+  // recognition can be measured on real cards. Best effort.
+  function feedback(id, name, how) {
+    if (!id) return;
+    fetch('/api/identify/feedback', {
+      method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ code, id, name, how }),
+    }).catch(() => {});
+  }
 
   // ---------- data messages between players ----------
   function send(msg, identities) {
@@ -172,7 +188,8 @@ window.Identify = (() => {
       return;
     }
     const sure = r.confident && current.pick === 0;
-    body.innerHTML = `
+    const weak = r.weak && current.pick === 0 ? '<p class="muted small">Nothing in the loaded decks stands out, so this card may not be in one of them.</p>' : '';
+    body.innerHTML = `${weak}
       <div class="id-result">
         <img class="id-big" src="${esc(pick.card.imageLarge || pick.card.image)}" alt="${esc(pick.card.name)}">
         <div class="id-info">
@@ -202,14 +219,19 @@ window.Identify = (() => {
         render();
         break;
       case 'place':
-        if (pick) window.Marks.placeCard(current.tileName, current.x, current.y, pick.card);
+        if (pick) {
+          feedback(current.result.id, pick.card.name, 'place');
+          window.Marks.placeCard(current.tileName, current.x, current.y, pick.card);
+        }
         $('identify-dialog').close();
         break;
       case 'open':
+        if (pick) feedback(current.result.id, pick.card.name, 'open');
         $('identify-dialog').close();
         if (pick) window.Marks.showCard(pick.card);
         break;
       case 'search':
+        feedback(current.result?.id, null, 'search');
         $('identify-dialog').close();
         window.Marks.openLookup();
         break;
@@ -219,7 +241,8 @@ window.Identify = (() => {
 
   // Read a card on my own camera without the dialog (cards held up to the camera). frac: the crop's
   // size as a share of the picture's short side. Resolves with the server's answer.
-  const read = (video, x, y, frac) => ask(video, x, y, me, frac, 800);
+  // share: the card's width as a share of that crop's.
+  const read = (video, x, y, frac, share) => ask(video, x, y, me, frac, 800, share);
 
-  return { init, setRoom, onData, clickAt, read };
+  return { init, setRoom, onData, clickAt, read, feedback };
 })();

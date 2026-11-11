@@ -4,7 +4,7 @@
 import fs from 'node:fs';
 import path from 'node:path';
 import { DATA_DIR } from '../scripts/lib.js';
-import { lookupMany } from './scryfall.js';
+import { lookupEntries } from './scryfall.js';
 
 const DECKS_FILE = path.join(DATA_DIR, 'decks.json');
 const MAX_LINES = 300;
@@ -60,10 +60,16 @@ export function parseDeck(text) {
     name = name
       .replace(/\s+\*[A-Z]+\*/g, '') // *F* foil markers
       .replace(/\s+\[[^\]]*\]/g, '') // [SET] or [Category]
-      .replace(/\s+\([A-Za-z0-9]{2,6}\)(\s+[\w★-]+)?\s*$/, '') // (SET) 123
       .replace(/\s+#\S.*$/, '') // #tags
       .trim();
-    if (name) entries.push({ qty, name, section: lineSection });
+    // "(SET) 123" says which printing the player owns: kept, so the deck shows it and card
+    // recognition learns that one first.
+    const print = /\s+\(([A-Za-z0-9]{2,6})\)(?:\s+([\w★†-]+))?\s*$/.exec(name);
+    if (print) name = name.slice(0, print.index).trim();
+    if (!name) continue;
+    const entry = { qty, name, section: lineSection };
+    if (print?.[2]) Object.assign(entry, { set: print[1], number: print[2] });
+    entries.push(entry);
   }
   return entries;
 }
@@ -78,15 +84,23 @@ function mainType(typeLine) {
 export async function loadDeck(room, name, text) {
   const entries = parseDeck(text);
   if (entries.length === 0) throw new Error('No cards found. Paste one card per line, like "1 Sol Ring".');
-  const { cards, notFound } = await lookupMany(entries.map((e) => e.name));
+  const { cards, notFound } = await lookupEntries(entries);
   const list = [];
-  for (const e of entries) {
-    const card = cards.get(e.name.toLowerCase());
-    if (!card) continue;
+  entries.forEach((e, k) => {
+    const card = cards[k];
+    if (!card) return;
     const existing = list.find((x) => x.name === card.name && x.section === e.section);
-    if (existing) existing.qty += e.qty;
-    else list.push({ ...card, qty: e.qty, section: e.section, group: e.section === 'main' ? mainType(card.typeLine) : e.section });
-  }
+    if (!existing) {
+      list.push({ ...card, qty: e.qty, section: e.section, group: e.section === 'main' ? mainType(card.typeLine) : e.section });
+      return;
+    }
+    existing.qty += e.qty;
+    // The same card in another printing: shown as the first one, but recognition learns each.
+    const known = [existing, ...(existing.prints || [])].some((p) => p.scryfallId === card.scryfallId);
+    if (!known && (existing.prints || []).length < 8) {
+      (existing.prints ??= []).push({ scryfallId: card.scryfallId, image: card.image, imageLarge: card.imageLarge });
+    }
+  });
   list.sort((a, b) => (a.cmc - b.cmc) || a.name.localeCompare(b.name));
   const count = list.filter((c) => c.section === 'main' || c.section === 'commander').reduce((s, c) => s + c.qty, 0);
   const deck = { owner: name, updated: new Date().toISOString(), cards: list, notFound };

@@ -16,7 +16,7 @@ import {
 } from './game.js';
 import { autocomplete, namedCard } from './scryfall.js';
 import { allDeckCards, getDeck, loadDeck, removeDeck, roomDecks } from './decks.js';
-import { identify, indexCards, modelsAvailable } from './recognize.js';
+import { identify, indexCards, labelCapture, modelsAvailable, warmUp } from './recognize.js';
 import { handleAccessLog, startAccessLog } from './accesslog.js';
 import { startCost } from './cost.js';
 import { count, handleMetrics, noteToken, startMetrics } from './metrics.js';
@@ -34,7 +34,10 @@ function loadedDeckResult(invite, summary, commanders) {
 }
 
 // Build card-recognition reference vectors for saved decks in the background.
-setTimeout(() => indexCards(allDeckCards()).catch((err) => console.warn('Card index failed:', err.message)), 2000);
+setTimeout(() => {
+  warmUp();
+  indexCards(allDeckCards()).catch((err) => console.warn('Card index failed:', err.message));
+}, 2000);
 
 // Drop faded drawings every few seconds so late joiners don't see stale arrows.
 setInterval(() => {
@@ -372,27 +375,45 @@ async function handle(req, res) {
     decks.sort((a, b) => (b.owner === player) - (a.owner === player));
     const candidates = decks.flatMap((d) => d.cards.map((card) => ({ card, owner: d.owner })));
     try {
-      const result = await identify(image, { x: clamp(url.searchParams.get('x')), y: clamp(url.searchParams.get('y')) }, candidates);
+      const result = await identify(image, { x: clamp(url.searchParams.get('x')), y: clamp(url.searchParams.get('y')) }, candidates, {
+        size: Number(url.searchParams.get('s')) || 0, // the card's width as a share of the image's, if the browser knows
+        note: { by: invite.name, player, room: invite.room },
+      });
       if (result.found) {
         result.matches = result.matches.map(({ card, owner, score }) => ({
           owner,
-          score: Math.round(score * 1000) / 1000,
+          score,
           card: {
             type: 'card', name: card.name, scryfallId: card.scryfallId, typeLine: card.typeLine,
             image: card.image, imageLarge: card.imageLarge, power: card.power ?? '', toughness: card.toughness ?? '',
           },
         }));
-        const [first, second] = result.matches;
-        result.confident = !!first && first.score >= 0.3 && first.score - (second?.score || 0) >= 0.07;
       }
       const top = result.matches?.[0];
       const said = !result.found ? 'no card found' : !top ? 'no deck match' : `${top.card.name} ${top.score}${result.confident ? '' : ' (unsure)'}`;
-      console.log(`Identify by ${invite.name} on ${player || '?'}: ${said} in ${result.ms} ms`);
+      count(!result.found ? 'identifyNoCard' : result.confident ? 'identifySure' : 'identifyUnsure');
+      console.log(`Identify by ${invite.name} on ${player || '?'}: ${said} in ${result.ms} ms (${result.runs} looks)`);
       return send(res, 200, result);
     } catch (err) {
       console.error('Recognition error', err);
       return send(res, 400, { error: 'Could not read that image.' });
     }
+  }
+
+  // What the player did with a lookup (placed the first match, picked another, searched by name):
+  // saved next to the logged picture, so recognition can be measured on real cards.
+  if (req.method === 'POST' && p === '/api/identify/feedback') {
+    let body;
+    try {
+      body = JSON.parse(await readBody(req, 2000));
+    } catch {
+      return send(res, 400, { error: 'Bad request' });
+    }
+    const invite = guest(body.code, 'feedback', 60);
+    if (!invite) return;
+    const name = typeof body.name === 'string' ? body.name.slice(0, 200) : null;
+    labelCapture(body.id, { name, how: String(body.how || '').slice(0, 20), by: invite.name, at: new Date().toISOString() });
+    return send(res, 204, '');
   }
 
   // Browsers report their video stats here so the host can check quality from the log.

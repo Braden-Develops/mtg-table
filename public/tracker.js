@@ -471,43 +471,39 @@ window.Tracker = (() => {
   let lastDetMs = 0;
   let lastJob = null;
 
-  // Crop a square around (x, y) (working pixels) from the full-quality video and find the cards in it.
-  // Resolves with poses in working pixels: all (anything card-ish) and poses (well-shaped ones).
-  function detect(video, x, y, sideWork) {
-    const k = work.vw / work.w;
-    const short = Math.min(work.vw, work.vh);
-    const side = Math.round(Math.min(short * 0.6, Math.max(short * 0.22, sideWork * k)));
-    const left = Math.round(Math.max(0, Math.min(work.vw - side, x * k - side / 2)));
-    const top = Math.round(Math.max(0, Math.min(work.vh - side, y * k - side / 2)));
-    const region = { left: left / k, top: top / k, side: side / k };
-    return runDetector(video, left, top, side).then((cards) => {
-      const all = cards.map((c) => {
-        const quad = c.quad.map(([qx, qy]) => [region.left + qx * region.side, region.top + qy * region.side]);
-        return { ...poseFromQuad(quad), quad, score: c.score };
-      }).filter((p) => p.a > 6);
-      return { region, all, poses: all.filter((p) => p.shape > 0.5) };
-    });
-  }
-
-  // Run the model on a square of the video (video pixels). Quads come back 0-1 over that square.
-  function runDetector(video, left, top, side) {
+  // Run the model on a frame of the video: a rotated rectangle { cx, cy, th, w, h } in video pixels,
+  // squashed to the model's square input (see cardfind.js for why the frame's shape matters).
+  // Resolves with [{ score, quad }], corners in video pixels.
+  function runDetector(video, f) {
     if (!detCanvas) {
       detCanvas = document.createElement('canvas');
       detCanvas.width = DET;
       detCanvas.height = DET;
       detCtx = detCanvas.getContext('2d', { willReadFrequently: true });
     }
-    detCtx.drawImage(video, left, top, side, side, 0, 0, DET, DET);
+    detCtx.setTransform(1, 0, 0, 1, 0, 0);
+    detCtx.fillStyle = '#444'; // where the frame reaches past the picture
+    detCtx.fillRect(0, 0, DET, DET);
+    detCtx.translate(DET / 2, DET / 2);
+    detCtx.scale(DET / f.w, DET / f.h);
+    detCtx.rotate(-f.th);
+    detCtx.translate(-f.cx, -f.cy);
+    detCtx.drawImage(video, 0, 0);
+    detCtx.setTransform(1, 0, 0, 1, 0, 0);
     const pixels = detCtx.getImageData(0, 0, DET, DET).data;
     const id = ++reqId;
     worker.postMessage({ t: 'detect', id, pixels }, [pixels.buffer]);
-    return new Promise((resolve) => pending.set(id, resolve));
+    return new Promise((resolve) => pending.set(id, resolve))
+      .then((cards) => cards.map((c) => ({ score: c.score, quad: c.quad.map(([u, v]) => window.CardFind.fromFrame(f, u, v)) })));
   }
 
-  // For other tools (reading cards held up to the camera): the cards in a square of my camera's
-  // picture (x, y = its centre, side = its size, all 0-1 of the picture's height). Loads the model
-  // if needed. Resolves with [{ score, shape, quad: 0-1 over the picture }], or null without a model.
-  async function findCards(video, x, y, side) {
+  // For other tools (reading cards held up to the camera): the card at a point of my camera's
+  // picture. x, y: the point (0-1 of the picture); side: twice the card's likely length, as a share
+  // of the picture's height. opts.table: it may be tapped (lying on the table), so both ways are
+  // tried; otherwise only upright (held in a hand), which is one or two looks.
+  // Loads the model if needed. Resolves with the outlines found, best first,
+  // [{ score, shape, a, b, cx, cy, quad }] in 0-1 of the picture (a, b: of its height), or null without a model.
+  async function findCards(video, x, y, side, opts = {}) {
     if (detector === 'off') loadDetector();
     for (let i = 0; detector === 'loading' && i < 600; i++) await new Promise((r) => setTimeout(r, 100));
     if (detector !== 'ready' || !video?.videoWidth) return null;
@@ -516,15 +512,13 @@ window.Tracker = (() => {
     try {
       const vw = video.videoWidth;
       const vh = video.videoHeight;
-      const px = Math.round(Math.min(vw, vh, side * vh));
-      const left = Math.round(Math.max(0, Math.min(vw - px, x * vw - px / 2)));
-      const top = Math.round(Math.max(0, Math.min(vh - px, y * vh - px / 2)));
-      const cards = await runDetector(video, left, top, px);
-      return cards.map((c) => {
-        const quad = c.quad.map(([qx, qy]) => [left + qx * px, top + qy * px]);
-        const pose = poseFromQuad(quad);
-        return { score: c.score, shape: pose.shape, a: pose.a / vh, b: pose.b / vh, cx: pose.cx / vw, cy: pose.cy / vh, quad: quad.map(([qx, qy]) => [qx / vw, qy / vh]) };
+      const len = (side * vh) / 2;
+      const r = await window.CardFind.locate((f) => runDetector(video, f), [x * vw, y * vh], {
+        size: len * 0.716, angle: 0, only: !opts.table, near: len * 0.5, bounds: [vw, vh], maxRuns: opts.table ? 5 : 3,
       });
+      return [r.card, ...r.others].filter(Boolean).map((p) => ({
+        score: p.score, shape: p.shape, a: p.a / vh, b: p.b / vh, cx: p.cx / vw, cy: p.cy / vh, quad: p.quad.map(([qx, qy]) => [qx / vw, qy / vh]),
+      }));
     } finally {
       jobBusy = false;
     }
@@ -538,59 +532,30 @@ window.Tracker = (() => {
   }
   const cardSize = () => (cardLen && work ? cardLen / work.h : null); // share of the picture's height
 
-  // The model outlines a card well only when it's near the middle of what it's shown and about half
-  // its height (tested on a dark card on a dark mat in dim light: 0.78 confident at 2x the card's
-  // height, 0.33 at 2.6x, nothing at 3.3x). So: look centred on (x, y) at a few sizes, re-centre on
-  // the nearest candidates, and stop at the first size that gives a confident outline.
-  // under: also accept a fainter outline (dark cards on dark mats score 0.45-0.6) if it is a clean
-  // card shape with (x, y) inside it, when nothing confident turns up at any size.
-  async function locate(video, x, y, sizes, maxCards, under = false) {
-    let faint = null;
-    const good = (p) => p.shape > 0.75 && p.score > 0.55
-      && (!cardLen || (p.b > cardLen * 0.6 && p.b < cardLen * 1.6)); // about the size of the other cards
-    const tried = [];
-    for (const side of sizes) {
-      const first = await detect(video, x, y, side);
-      const mid = [first.region.left + first.region.side / 2, first.region.top + first.region.side / 2];
-      const near = first.all
-        .filter((p) => Math.hypot(p.cx - x, p.cy - y) < Math.max(p.b, side * 0.35))
-        .sort((p, q) => Math.hypot(p.cx - x, p.cy - y) - Math.hypot(q.cx - x, q.cy - y))
-        .slice(0, maxCards);
-      tried.push(`${Math.round(side)}:${first.all.length}/${near.length}`);
-      const found = [];
-      for (const c of near) {
-        let cur = c;
-        let centred = Math.hypot(c.cx - mid[0], c.cy - mid[1]) < first.region.side * 0.1;
-        // Re-centre on it once if it wasn't in the middle or wasn't confident.
-        for (let pass = 0; pass < 1 && !(centred && good(cur) && cur.score > 0.8); pass++) {
-          const again = await detect(video, cur.cx, cur.cy, side);
-          const best = again.poses
-            .filter((p) => Math.hypot(p.cx - cur.cx, p.cy - cur.cy) < Math.max(cur.a, p.a) * 0.6)
-            .sort((p, q) => q.score * q.shape - p.score * p.shape)[0];
-          if (!best) break;
-          centred = Math.hypot(best.cx - cur.cx, best.cy - cur.cy) < again.region.side * 0.1;
-          if (best.score * best.shape >= cur.score * cur.shape || !good(cur)) cur = best;
-        }
-        if (good(cur)) found.push(cur);
-        else if (under && cur.score > 0.42 && cur.shape > 0.85 && insideQuad([x, y], cur.quad)
-          && (!cardLen || (cur.b > cardLen * 0.6 && cur.b < cardLen * 1.6))
-          && (!faint || cur.score * cur.shape > faint.score * faint.shape)) faint = cur;
-      }
-      if (found.length) {
-        lastJob = { at: [Math.round(x), Math.round(y)], tried, found: found.map((p) => `${Math.round(p.cx)},${Math.round(p.cy)} s${p.score.toFixed(2)} sh${p.shape.toFixed(2)}`) };
-        return found;
-      }
-    }
-    lastJob = { at: [Math.round(x), Math.round(y)], tried, found: [], faint: faint && `${Math.round(faint.cx)},${Math.round(faint.cy)} s${faint.score.toFixed(2)} sh${faint.shape.toFixed(2)}` };
-    return faint ? [faint] : [];
+  // The card at (x, y) (working pixels), found by the shared search in cardfind.js: the model only
+  // outlines a card well when it's shown upright, in a tall frame, filling about half its width, so
+  // the search tries such frames (the size of the other cards on this camera first) and re-frames
+  // on what it finds until the model is sure.
+  // opts.near: also take a card whose centre is within this distance (working pixels) of the point.
+  // opts.angle: how the card was turned when last seen (a pose's th).
+  // opts.faint: also return an outline the model was less sure of (dark cards on dark mats).
+  // Resolves with poses in working pixels, best first; only cards about the size of the others.
+  async function locate(video, x, y, opts = {}) {
+    const k = work.vw / work.w;
+    const run = (f) => runDetector(video, { cx: f.cx * k, cy: f.cy * k, th: f.th, w: f.w * k, h: f.h * k })
+      .then((cards) => cards.map((c) => ({ score: c.score, quad: c.quad.map(([qx, qy]) => [qx / k, qy / k]) })));
+    const r = await window.CardFind.locate(run, [x, y], {
+      size: cardLen ? cardLen * 0.716 : 0,
+      // No card measured on this camera yet: a rough look around the point gives a first size.
+      span: cardLen ? 0 : Math.min(work.w, work.h) * 0.5,
+      angle: opts.angle ?? null, near: opts.near || 0, bounds: [work.w, work.h], maxRuns: opts.maxRuns || 6,
+    });
+    const found = (r.sure || opts.faint ? [r.card, ...r.others] : r.others.filter((p) => p.sure)).filter(Boolean)
+      .map((p) => ({ ...poseFromQuad(p.quad), quad: p.quad, score: p.score }))
+      .filter((p) => p.shape > 0.6 && (!cardLen || (p.b > cardLen * 0.6 && p.b < cardLen * 1.6)));
+    lastJob = { at: [Math.round(x), Math.round(y)], looks: r.runs, sure: r.sure, found: found.map((p) => `${Math.round(p.cx)},${Math.round(p.cy)} s${p.score.toFixed(2)} sh${p.shape.toFixed(2)}`) };
+    return found;
   }
-
-  // Crop sizes (working pixels) to try, as multiples of a card's height on camera; before any card
-  // has been measured, as shares of the picture's height.
-  const sizesFor = (mults, start = 0) => {
-    const list = cardLen ? mults.map((m) => cardLen * m) : [0.42, 0.32, 0.55, 0.26].map((f) => Math.min(work.w, work.h) * f);
-    return list.slice(start % list.length).concat(list.slice(0, start % list.length));
-  };
 
   // Pick the next job for the model: find lost cards first, then check doubtful ones, then new
   // stickers, then straighten cards that came to rest.
@@ -619,9 +584,9 @@ window.Tracker = (() => {
   async function acquire(video, t) {
     t.phase = 'acquire';
     const pt = [t.x * work.w, t.y * work.h];
-    // The model can miss a card for a given framing: each retry frames it differently.
+    // Each retry spends a little longer looking (more sizes and angles).
     const seeded = fromIdentify(pt);
-    const cards = seeded ? [seeded] : await locate(video, pt[0], pt[1], sizesFor([2, 2.6, 1.6, 3.2], t.tries), 1, true);
+    const cards = seeded ? [seeded] : await locate(video, pt[0], pt[1], { faint: true, maxRuns: 6 + 2 * Math.min(t.tries, 2) });
     if (t.phase !== 'acquire' || !tracks.has(t.id)) return; // moved or removed meanwhile
     const under = cards.filter((p) => insideQuad([t.x * work.w, t.y * work.h], p.quad))
       .sort((a, b) => b.score * b.shape - a.score * a.shape)[0];
@@ -642,7 +607,7 @@ window.Tracker = (() => {
     t.retryAt = now + 700;
     // Where it was last seen for sure (a doubtful track may have drifted onto something else).
     const at = doubt || t.weakMs > 0 ? { ...t.good } : restingGuess(t);
-    const cards = await locate(video, at.cx, at.cy, sizesFor(doubt ? [2] : [2, 3]), doubt ? 1 : 2);
+    const cards = await locate(video, at.cx, at.cy, { near: t.b * (doubt ? 0.75 : 1.3), angle: t.pose.th, maxRuns: doubt ? 4 : 7 });
     if (t.phase !== 'track' || !tracks.has(t.id) || (!doubt && t.lostMs === 0)) return; // found meanwhile
     let best = null;
     for (const p of cards) {
@@ -682,7 +647,7 @@ window.Tracker = (() => {
   async function straighten(video, t) {
     t.moved = false;
     const at = { ...t.pose };
-    const cards = await locate(video, at.cx, at.cy, sizesFor([2]), 1);
+    const cards = await locate(video, at.cx, at.cy, { near: t.a * 0.35, angle: at.th, maxRuns: 4 });
     if (t.phase !== 'track' || t.moved || t.lostMs) return;
     const p = cards.find((q) => Math.hypot(q.cx - at.cx, q.cy - at.cy) < t.a * 0.35);
     if (!p) return;
@@ -927,11 +892,11 @@ window.Tracker = (() => {
   }
 
   // For testing from the console: what the model finds around a point (working pixels).
-  async function probe(x, y, side, maxCards = 2) {
+  async function probe(x, y, opts = {}) {
     while (jobBusy) await new Promise((r) => setTimeout(r, 50));
     jobBusy = true;
     try {
-      return (await locate(localVideo(), x, y, [].concat(side), maxCards)).map((p) => ({ cx: Math.round(p.cx), cy: Math.round(p.cy), a: Math.round(p.a), b: Math.round(p.b), th: p.th.toFixed(2), shape: p.shape.toFixed(2), score: p.score.toFixed(2) }));
+      return (await locate(localVideo(), x, y, { faint: true, ...opts })).map((p) => ({ cx: Math.round(p.cx), cy: Math.round(p.cy), a: Math.round(p.a), b: Math.round(p.b), th: p.th.toFixed(2), shape: p.shape.toFixed(2), score: p.score.toFixed(2) }));
     } finally {
       jobBusy = false;
     }

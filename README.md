@@ -96,15 +96,53 @@ Set your home network to **Private** in Windows settings, and allow both program
   went, the message offers "Place it myself". Runs in your browser (`public/autoread.js`): a tiny
   greyscale copy of the camera spots something big held still, the corner model checks it's a card.
   Per player: menu → "Read cards I hold up".
+- **Identify** (tools bar): click a card on anyone's video to find out what it is. It is matched
+  against the decks loaded at the table and shown as a sure "Match" or a "Best guess" with the other
+  close candidates; see [Card recognition](#card-recognition).
+- **Space** passes the turn on your own turn (not while typing or with a dialog open).
 - **Game modes** (Game panel): Commander (40 life, commander damage), Brawl (25 life head-to-head,
   30 multiplayer, no commander damage), Standard (20 life). Starting life can be overridden.
 - **Decks** panel: paste a deck list (Moxfield/Archidekt/Arena exports work); cards are looked up on
   Scryfall and anyone can browse them. A `Commander` section sets your commander; otherwise click ★.
+  Exports that name the printing (`1 Sol Ring (C21) 263`) load that exact printing, which is also
+  the one card recognition learns first.
   Commander chips show on your video with commander tax. Decks live in `data/decks.json`.
 - A stack's big number is its effective P/T: the last card or "Set P/T" value, plus modifiers and
   +N/+N counters.
 - Scryfall requests go through the server (`server/scryfall.js`), which caches them and stays under
   Scryfall's rate limit.
+
+## Card recognition
+
+Needs the two model files in `models/` (see Deploying). How a lookup works (`server/recognize.js`):
+
+1. **Find the card's corners.** The corner model only works on a card shown the way it was trained:
+   upright in a tall 9:16 frame, filling about half its width (then it is accurate to a pixel or two;
+   on any other crop it is off by 10-30% of the card). `public/cardfind.js` tries such frames around
+   the click until the model is sure. The same file drives sticker tracking and held-card reading in
+   the browser.
+2. **Compare with reference pictures** of every different-looking printing of each deck card (from
+   Scryfall, cached in `data/references-v4.bin`; a new deck's own printings are ready in about a
+   minute, the rest follow in the background). Two comparisons are added up: the embedding model,
+   and a plain 32×45 colour and contrast comparison that also tries the outline trimmed a little on
+   each side (sleeves, loose outlines on dark mats).
+3. **Decide how sure it is.** A "Match" has to stand well clear of the next card; otherwise it's a
+   "Best guess", and if nothing stands out the dialog says the card may not be in a loaded deck.
+
+**Measuring it.** Every lookup is kept in `data/identify-log/` (the cropped camera picture, the
+answer, and what the player then picked); the newest 400 are kept, about 60 MB. `RECOG_LOG_MAX=0`
+in the service file turns that off, or set another number. To see how the current code does on them:
+
+```bash
+node scripts/recog-replay.js       # add -v to list every lookup
+```
+
+Copy lookups worth keeping as a permanent test set into `data/identify-fixtures/` (same layout; put
+the right card name in `label.json`). Run this before and after changing anything in recognition.
+
+`RECOG_THREADS=1` makes lookups use one CPU core instead of two, leaving the other for video on a
+two-core server (lookups take about twice as long). `/metrics` has `mtg_card_identify_result_total`
+(match / guess / no_card).
 
 ## Video stats
 
