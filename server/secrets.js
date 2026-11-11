@@ -25,7 +25,7 @@ async function connect(region) {
 }
 
 // This VM's compartment and region, from the instance metadata service.
-async function whereAmI() {
+export async function whereAmI() {
   const res = await fetch('http://169.254.169.254/opc/v2/instance/', {
     headers: { Authorization: 'Bearer Oracle' },
     signal: AbortSignal.timeout(3000),

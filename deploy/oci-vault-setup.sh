@@ -11,6 +11,15 @@
 #   dynamic group "mtg-table" (the VM named mtg-table) and policy "mtg-table-secrets"
 #   letting only that VM read those secrets and update the Discord token (it may also list secret
 #   names, never their contents, to find its vault).
+# Also policy "mtg-table-cost": the VM may read (never change) the tenancy's cost and budgets, so
+# Grafana can show spend (server/cost.js).
+#
+# Optional monthly budget with email alerts (sent by Oracle, so they work even if the VM is down):
+#
+#   curl -fsSL .../oci-vault-setup.sh | BUDGET=10 ALERT_EMAIL=you@example.com bash
+#
+# creates budget "mtg-table" of 10 (your billing currency) per month for the whole tenancy, emailing
+# when actual spend passes 50% and 100%, and when Oracle forecasts the month will pass 100%.
 # Safe to run again.
 set -euo pipefail
 
@@ -86,6 +95,52 @@ else
   oci iam policy create -c "$T" --name mtg-table-secrets --description "MTG Table VM: its own secrets only" \
     --statements "$STATEMENTS" >/dev/null
   echo "created"
+fi
+
+say "Cost policy"
+COST_STATEMENTS='["Allow dynamic-group mtg-table to read usage-report in tenancy",
+ "Allow dynamic-group mtg-table to read usage-budgets in tenancy"]'
+CPOL=$(oci iam policy list -c "$T" --all --query "data[?name=='mtg-table-cost'].id | [0]" --raw-output)
+if [ -n "$CPOL" ] && [ "$CPOL" != "null" ]; then
+  oci iam policy update --policy-id "$CPOL" --statements "$COST_STATEMENTS" --version-date "" --force >/dev/null
+  echo "updated"
+else
+  oci iam policy create -c "$T" --name mtg-table-cost --description "MTG Table VM: read cost and budgets for Grafana" \
+    --statements "$COST_STATEMENTS" >/dev/null
+  echo "created"
+fi
+
+say "Budget"
+if [ -z "${BUDGET:-}" ] || [ -z "${ALERT_EMAIL:-}" ]; then
+  echo "skipped (run again with BUDGET=<monthly amount> ALERT_EMAIL=<address> to add one)"
+else
+  BUD=$(oci budgets budget list -c "$T" --all --target-type ALL \
+    --query "data[?\"display-name\"=='mtg-table'].id | [0]" --raw-output)
+  if [ -n "$BUD" ] && [ "$BUD" != "null" ]; then
+    oci budgets budget update --budget-id "$BUD" --amount "$BUDGET" --force >/dev/null
+    echo "already there; amount set to $BUDGET"
+  else
+    BUD=$(oci budgets budget create -c "$T" --display-name mtg-table --amount "$BUDGET" --reset-period MONTHLY \
+      --target-type COMPARTMENT --targets "[\"$T\"]" --description "MTG Table monthly spend" \
+      --query data.id --raw-output)
+    echo "created ($BUDGET per month)"
+  fi
+  alert() { # name, type, percent
+    local id
+    id=$(oci budgets alert-rule list --budget-id "$BUD" --all --query "data[?\"display-name\"=='$1'].id | [0]" --raw-output)
+    if [ -n "$id" ] && [ "$id" != "null" ]; then
+      oci budgets alert-rule update --budget-id "$BUD" --alert-rule-id "$id" --recipients "$ALERT_EMAIL" --force >/dev/null
+      echo "alert $1: already there (recipient updated)"
+    else
+      oci budgets alert-rule create --budget-id "$BUD" --display-name "$1" --type "$2" --threshold "$3" \
+        --threshold-type PERCENTAGE --recipients "$ALERT_EMAIL" \
+        --message "MTG Table: Oracle Cloud spend alert ($1)" >/dev/null
+      echo "alert $1: created"
+    fi
+  }
+  alert actual-50 ACTUAL 50
+  alert actual-100 ACTUAL 100
+  alert forecast-100 FORECAST 100
 fi
 
 say "Done. Tell Claude it finished; the server finds the vault by its name."

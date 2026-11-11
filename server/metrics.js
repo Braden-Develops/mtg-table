@@ -8,6 +8,7 @@
 import crypto from 'node:crypto';
 import fs from 'node:fs';
 import { RoomServiceClient } from 'livekit-server-sdk';
+import { cost } from './cost.js';
 import { overLimit, peek } from './host.js';
 
 const SAMPLE_MS = 15_000;
@@ -136,7 +137,22 @@ function render() {
     metric('mtg_network_transmit_bytes_total', 'counter', 'Bytes sent by the server network card (resets on reboot).', [[{ iface: net.iface }, net.tx]]);
     metric('mtg_network_receive_bytes_total', 'counter', 'Bytes received by the server network card (resets on reboot).', [[{ iface: net.iface }, net.rx]]);
   }
-  metric('mtg_uptime_seconds', 'gauge', 'Seconds since the app started.', [[null, Math.round((now - startedAt) / 1000)]]);
+  if (cost.usage) {
+    const { currency, services, fetchedAt } = cost.usage;
+    const total = [...services.values()].reduce((a, b) => a + b, 0);
+    metric('oci_cost_month_to_date', 'gauge', 'Oracle Cloud cost so far this month (UTC), as of Oracle\'s last update.',
+      [[{ currency }, total.toFixed(4)]]);
+    metric('oci_cost_month_to_date_by_service', 'gauge', 'Oracle Cloud cost so far this month, per service.',
+      [...services].map(([service, v]) => [{ service, currency }, v.toFixed(4)]));
+    metric('oci_cost_fetched_timestamp_seconds', 'gauge', 'When the cost was last fetched from Oracle.', [[null, Math.round(fetchedAt / 1000)]]);
+  }
+  if (cost.budgets) {
+    const rows = (k) => cost.budgets.items.map((x) => [{ budget: x.name }, x[k]]);
+    metric('oci_budget_amount', 'gauge', 'Budget limit for the period.', rows('amount'));
+    metric('oci_budget_actual_spend', 'gauge', 'Spend so far in the budget period.', rows('actual'));
+    metric('oci_budget_forecast_spend', 'gauge', 'Oracle\'s forecast of spend for the whole budget period.', rows('forecast'));
+  }
+  metric('mtg_uptime_seconds','gauge', 'Seconds since the app started.', [[null, Math.round((now - startedAt) / 1000)]]);
   return out.join('\n') + '\n';
 }
 
