@@ -65,7 +65,10 @@ export function warmUp() {
   if (modelsAvailable()) getSessions().catch((err) => console.warn('Recognition models failed to load:', err.message));
 }
 
-// One model run at a time keeps memory and CPU predictable. Lookups go ahead of background indexing.
+// One model run at a time. Running lookups side by side was tried and gains nothing: this
+// library runs a model on the main thread (60% of a lookup, measured), so they still take turns.
+// Real parallel lookups would need worker threads, each with its own copy of the models.
+// Lookups go ahead of background indexing.
 const waiting = { urgent: [], background: [] };
 let running = false;
 function serial(fn, urgent = true) {
@@ -293,6 +296,9 @@ function shrink(I, l = 0, t = 0, r = 0, b = 0, flip = false) {
 // What gets compared: each colour with its average removed (so overall brightness and tint don't
 // matter), plus the brightness of each pixel against its neighbourhood (which survives glare and
 // washed-out exposure). The two halves weigh the same; the whole is a unit vector.
+const GRAY = new Float64Array(LW * LH); // scratch space for lowFeature (it never runs twice at once)
+const SUM = new Float64Array((LW + 1) * (LH + 1));
+const SUMSQ = new Float64Array((LW + 1) * (LH + 1));
 function lowFeature(small) {
   const out = new Float32Array(LOW);
   let k = 0;
@@ -314,23 +320,37 @@ function lowFeature(small) {
   norm = Math.sqrt(norm * 2) || 1;
   for (let i = 0; i < k; i++) out[i] /= norm;
 
-  const gray = new Float32Array(LW * LH);
-  for (let i = 0; i < gray.length; i++) gray[i] = small[i * 3] * 0.3 + small[i * 3 + 1] * 0.59 + small[i * 3 + 2] * 0.11;
+  // Neighbourhood mean and spread from running sums (this runs hundreds of times per lookup, for
+  // the trimming search; adding up each 7x7 neighbourhood by hand was most of a lookup's time).
+  const gray = GRAY;
+  const S = SUM;
+  const SS = SUMSQ;
+  const W1 = LW + 1;
+  for (let y = 0; y < LH; y++) {
+    let row = 0;
+    let rowSq = 0;
+    for (let x = 0; x < LW; x++) {
+      const i = y * LW + x;
+      const g = small[i * 3] * 0.3 + small[i * 3 + 1] * 0.59 + small[i * 3 + 2] * 0.11;
+      gray[i] = g;
+      row += g;
+      rowSq += g * g;
+      const o = (y + 1) * W1 + x + 1;
+      S[o] = S[o - W1] + row;
+      SS[o] = SS[o - W1] + rowSq;
+    }
+  }
   const R = 3;
   norm = 0;
   for (let y = LM; y < LH - LM; y++) {
+    const ya = Math.max(0, y - R);
+    const yb = Math.min(LH - 1, y + R) + 1;
     for (let x = LM; x < LW - LM; x++) {
-      let s = 0;
-      let ss = 0;
-      let n = 0;
-      for (let yy = Math.max(0, y - R); yy <= Math.min(LH - 1, y + R); yy++) {
-        for (let xx = Math.max(0, x - R); xx <= Math.min(LW - 1, x + R); xx++) {
-          const v = gray[yy * LW + xx];
-          s += v;
-          ss += v * v;
-          n++;
-        }
-      }
+      const xa = Math.max(0, x - R);
+      const xb = Math.min(LW - 1, x + R) + 1;
+      const n = (xb - xa) * (yb - ya);
+      const s = S[yb * W1 + xb] - S[ya * W1 + xb] - S[yb * W1 + xa] + S[ya * W1 + xa];
+      const ss = SS[yb * W1 + xb] - SS[ya * W1 + xb] - SS[yb * W1 + xa] + SS[ya * W1 + xa];
       const mean = s / n;
       const v = (gray[y * LW + x] - mean) / (Math.sqrt(Math.max(0, ss / n - mean * mean)) + 8);
       out[k++] = v;

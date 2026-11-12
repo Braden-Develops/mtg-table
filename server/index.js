@@ -364,7 +364,7 @@ async function handle(req, res) {
   // Card recognition. Body: JPEG of the area around the click. Query: code, player (whose video),
   // x/y (click position inside the image, 0-1). Matches that player's deck first, then everyone's.
   if (req.method === 'POST' && p === '/api/identify') {
-    const invite = guest(url.searchParams.get('code'), 'identify', 20);
+    const invite = guest(url.searchParams.get('code'), 'identify', 40);
     if (!invite) return;
     if (!modelsAvailable()) return send(res, 503, { error: 'Card recognition is not installed on this server.' });
     let image;

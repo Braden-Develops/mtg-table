@@ -882,7 +882,12 @@ window.Tracker = (() => {
     }
     const current = ncc(t, t.pose.cx, t.pose.cy, t.pose.th, false);
     // The model confirms a card about as good or better: take its outline and a fresh template.
-    if (best && (!doubt || best.rank > current - 0.05)) reanchor(t, { ...best.pose, th: best.th });
+    if (best && (!doubt || best.rank > current - 0.05)) {
+      // Moved onto a card some way off, or sorted out among several lost at once: have it checked.
+      const far = Math.hypot(best.pose.cx - t.pose.cx, best.pose.cy - t.pose.cy) > t.b * 0.75;
+      reanchor(t, { ...best.pose, th: best.th });
+      if ((far || rivals.length) && (t.verifyTries || 0) < 3) t.verify = true;
+    }
     broadcastSoon();
   }
 
@@ -1019,6 +1024,37 @@ window.Tracker = (() => {
     }
   }
 
+  // ---------- for the reader (autoread.js) ----------
+  const recentlyGone = new Map(); // card name -> when its tag left my table
+  const wasHere = (name, ms) => performance.now() - (recentlyGone.get(name) ?? -Infinity) < ms;
+  // Stickers that were moved to a card some way from where theirs was (cards swapped or shuffled):
+  // worth one lookup each to make sure the tag is on the right card. [{ id, name, x, y, a }]
+  function toVerify() {
+    if (!work) return [];
+    const now = performance.now();
+    const out = [];
+    for (const t of tracks.values()) {
+      if (!t.verify || t.phase !== 'track' || t.lostMs > 0 || now - (t.lastMove || 0) < 600) continue;
+      const name = state?.stickers?.[t.id]?.items.find((it) => it.type === 'card')?.name;
+      if (!name || state.stickers[t.id].unsure) { t.verify = false; continue; }
+      out.push({ id: t.id, name, x: t.pose.cx / work.w, y: t.pose.cy / work.h, a: t.a / work.h });
+    }
+    return out;
+  }
+  function verified(id) {
+    const t = tracks.get(id);
+    if (t) { t.verify = false; t.verifyTries = (t.verifyTries || 0) + 1; }
+  }
+  function markVerify(id) {
+    const t = tracks.get(id);
+    if (t && (t.verifyTries || 0) < 3) t.verify = true;
+  }
+  // Another of my stickers carrying this card, if any: { id, x, y }.
+  function stickerNamed(name, except) {
+    const s = Object.values(state?.stickers || {}).find((x) => x.tile === me && x.id !== except && x.items.some((it) => it.type === 'card' && it.name === name));
+    return s ? { id: s.id, x: s.x, y: s.y } : null;
+  }
+
   // ---------- zones ----------
   // The player's piles (command zone, library, graveyard, exile), marked as boxes on their camera
   // with the Zones tool. A stickered card that comes to rest in one has gone there: the sticker is
@@ -1087,6 +1123,14 @@ window.Tracker = (() => {
 
   // ---------- game state ----------
   function sync(next) {
+    // Cards whose (confirmed) tag has just gone from my table: if one shows up again shortly, it is
+    // the same card (knocked off while cards were being moved about), not a new question.
+    if (state) {
+      for (const s of Object.values(state.stickers || {})) {
+        if (s.tile !== me || s.unsure || next.stickers?.[s.id]) continue;
+        for (const it of s.items) if (it.type === 'card') recentlyGone.set(it.name, performance.now());
+      }
+    }
     state = next;
     const mine = enabled ? Object.values(next.stickers || {}).filter((s) => s.tile === me && !s.fixed) : [];
     const ids = new Set(mine.map((s) => s.id));
@@ -1296,5 +1340,5 @@ window.Tracker = (() => {
     }
   }
 
-  return { init, setRoom, onData, sync, setEnabled, isEnabled: () => enabled, status, debug, probe, noteIdentified, findCards, stickerSpots, cardSize, hasFinder: () => hasFinder, load: () => loadDetector(), setDebug, isDebug: () => debugOn, colours, hasState: () => !!state, zones: () => state?.zones?.[me] || {}, piles: () => state?.piles?.[me] || {} };
+  return { init, setRoom, onData, sync, setEnabled, isEnabled: () => enabled, status, debug, probe, noteIdentified, findCards, stickerSpots, cardSize, hasFinder: () => hasFinder, load: () => loadDetector(), setDebug, isDebug: () => debugOn, colours, hasState: () => !!state, wasHere, toVerify, verified, markVerify, stickerNamed, zones: () => state?.zones?.[me] || {}, piles: () => state?.piles?.[me] || {} };
 })();
