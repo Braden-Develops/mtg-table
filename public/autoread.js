@@ -62,14 +62,15 @@ window.AutoRead = (() => {
     ({ code, me, act } = opts);
     loadIgnored();
     loadGallery();
-    if (enabled) start();
+    if (enabled || tagging) start();
   }
 
   function setEnabled(on) {
     enabled = !!on;
     try { localStorage.setItem('readHeld', enabled ? '1' : '0'); } catch { /* ignore */ }
-    if (enabled) start();
+    if (enabled || tagging) start();
     else stop();
+    if (!enabled) { phase = 'idle'; hold = null; bg = null; }
   }
 
   function start() {
@@ -162,7 +163,8 @@ window.AutoRead = (() => {
   // ---------- main loop ----------
   function tick() {
     const video = localVideo();
-    if (!enabled || !video || video.readyState < 2 || !video.videoWidth || busy) return;
+    // (Reading held-up cards and tagging table cards are switched on and off separately.)
+    if ((!enabled && !tagging) || !video || video.readyState < 2 || !video.videoWidth || busy) return;
     if (!window.Tracker?.findCards || !window.Identify?.read) return;
     const now = performance.now();
     const g = grab(video);
@@ -185,6 +187,7 @@ window.AutoRead = (() => {
         boardLook(video).catch((err) => console.warn('Tagging table cards:', err)).finally(() => { busy = false; });
         return;
       }
+      if (!enabled) return; // held-up cards aren't read
       if (!bg) { if (calmFor > 1000) bg = g; return; }
       const big = patches(g, bg)[0];
       const isBig = big && big.n > W * H * 0.05;
@@ -1000,6 +1003,7 @@ window.AutoRead = (() => {
     tagging = !!on;
     try { localStorage.setItem('autoTag', tagging ? '1' : '0'); } catch { /* ignore */ }
     known = [];
+    if (code) { if (enabled || tagging) start(); else stop(); } // (not before init)
   }
 
   // Put down yet? (Whole-picture finder.) One look lists every card; the one put down is a card of
