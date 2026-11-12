@@ -143,6 +143,17 @@ uses it; on a server without the file the app falls back to pointing the corner 
   table or held up to the camera. Tags are no longer removed by themselves, except when the card
   was last seen at one of your piles. Eye menu → "Tags stay when cards are picked up" switches
   the old behaviour (removed after a few seconds) back on.
+- **Known by sight.** Naming a card against reference scans is the uncertain step; once a card
+  has been named, how it looks through this camera is known exactly. So each named card gets
+  fingerprints taken from the camera (`public/autoread.js`, "what each card looks like here"), and
+  from then on the table look goes by those: a tag belongs on the card with its fingerprint and
+  is moved there, and a known card without a tag gets it back with no lookup and no question.
+  Lookups are only for cards not seen before. Measured on one table: a card against itself
+  0.91-1.00 (0.97-1.00 after being moved), against any other card 0.39-0.66. Fingerprints are kept
+  for the browser session. Card debug lists what each card looks most like, and by how much.
+- **One card tag per card.** Two on one card means something went wrong: the one that belongs
+  stays, a suggestion among the rest is dropped, and a confirmed one goes looking for its own
+  card.
 - **Stickers after a shuffle:** when several stickers lose their cards at once, each card goes to
   the sticker it fits best, by the card's colours as well as its outline.
 
