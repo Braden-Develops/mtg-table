@@ -113,6 +113,17 @@ window.Marks = (() => {
       window.AutoRead?.setTagging(!window.AutoRead.isTagging());
       showAutoTag();
     });
+    // Card debug: what recognition sees, drawn over my own camera.
+    const showDebug = () => {
+      const on = !!window.Tracker?.isDebug();
+      $('card-debug-btn').classList.toggle('on', on);
+      $('card-debug-btn').textContent = on ? 'Card debug on' : 'Card debug off';
+    };
+    showDebug();
+    $('card-debug-btn').addEventListener('click', () => {
+      window.Tracker.setDebug(!window.Tracker.isDebug());
+      showDebug();
+    });
     // Drawing color and thickness: per-viewer, remembered on this device.
     const load = (key, fallback) => { try { return localStorage.getItem(key) ?? fallback; } catch { return fallback; } };
     const save = (key, value) => { try { localStorage.setItem(key, value); } catch { /* ignore */ } };

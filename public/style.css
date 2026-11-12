@@ -365,6 +365,21 @@ body[data-tool="zone"] .zone-box span { color: #fff; background: rgba(0, 0, 0, .
 .zone-row .pile-x { margin-left: auto; padding: 0 6px; border: 0; background: transparent; color: var(--faint); cursor: pointer; }
 .zone-row .pile-x:hover { color: inherit; }
 .zone-row { cursor: pointer; }
+/* Card debug (eye menu): outlines and timings drawn over your own camera. */
+.card-debug { position: absolute; inset: 0; width: 100%; height: 100%; pointer-events: none; }
+.card-debug-text {
+  position: absolute;
+  left: 8px;
+  bottom: 34px;
+  max-width: 70%;
+  padding: 5px 8px;
+  border-radius: 6px;
+  background: rgba(0, 0, 0, .65);
+  color: #cfe;
+  font: 11px/1.45 ui-monospace, Consolas, monospace;
+  white-space: pre-wrap;
+  pointer-events: none;
+}
 .zone-box.drawing { border-style: solid; border-color: var(--accent); background: rgba(139, 92, 246, .15); }
 body[data-tool="pen"] .draw-bar,
 body[data-tool="arrow"] .draw-bar,

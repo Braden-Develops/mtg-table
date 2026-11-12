@@ -1117,6 +1117,106 @@ window.Tracker = (() => {
     return poses.map((p, i) => poses.map((q, j) => Math.max(colourLike(first[i], colourSig(q)), colourLike(first[i], colourSig({ ...q, th: q.th + Math.PI }))).toFixed(2)).join(' ') + `  @${Math.round(p.cx)},${Math.round(p.cy)}`);
   }
 
+  // ---------- card debug overlay ----------
+  // Eye menu -> "Card debug": draws on my own camera every card the finder outlines (green = taken
+  // as a card, yellow = too unsure; the dot is the card's own top-left corner), what each sticker
+  // is following (cyan, red while lost), and the timings of each step.
+  let debugOn = false;
+  try { debugOn = localStorage.getItem('cardDebug') === '1'; } catch { /* ignore */ }
+  let debugTimer = null;
+  let debugBusy = false;
+  function setDebug(on) {
+    debugOn = !!on;
+    try { localStorage.setItem('cardDebug', debugOn ? '1' : '0'); } catch { /* ignore */ }
+    clearInterval(debugTimer);
+    debugTimer = null;
+    document.querySelector('.card-debug')?.remove();
+    document.querySelector('.card-debug-text')?.remove();
+    if (debugOn) debugTimer = setInterval(drawDebug, 350);
+  }
+  async function drawDebug() {
+    const video = localVideo();
+    const layer = video?.closest('.tile')?.querySelector('.mark-layer');
+    if (!layer || !video.videoWidth || debugBusy) return;
+    debugBusy = true;
+    try {
+      if (detector === 'off') loadDetector();
+      const cards = detector === 'ready' && hasFinder ? await scanCards(video) : [];
+      let canvas = layer.querySelector('.card-debug');
+      let text = layer.querySelector('.card-debug-text');
+      if (!canvas) {
+        canvas = document.createElement('canvas');
+        canvas.className = 'card-debug';
+        text = document.createElement('div');
+        text.className = 'card-debug-text';
+        layer.append(canvas, text);
+      }
+      const w = layer.clientWidth;
+      const h = layer.clientHeight;
+      const dpr = window.devicePixelRatio || 1;
+      if (canvas.width !== Math.round(w * dpr) || canvas.height !== Math.round(h * dpr)) {
+        canvas.width = Math.round(w * dpr);
+        canvas.height = Math.round(h * dpr);
+      }
+      const g = canvas.getContext('2d');
+      g.setTransform(dpr, 0, 0, dpr, 0, 0);
+      g.clearRect(0, 0, w, h);
+      const s = w / video.videoWidth;
+      g.lineWidth = 1.5;
+      g.font = '11px ui-monospace, Consolas, monospace';
+      for (const c of cards) {
+        const p = poseFromQuad(c.quad);
+        const ok = c.score >= FIND_SURE && p.shape > 0.6;
+        g.strokeStyle = ok ? '#4f8' : '#fd4';
+        g.fillStyle = g.strokeStyle;
+        g.beginPath();
+        c.quad.forEach(([x, y], i) => (i ? g.lineTo(x * s, y * s) : g.moveTo(x * s, y * s)));
+        g.closePath();
+        g.stroke();
+        g.beginPath();
+        g.arc(c.quad[0][0] * s, c.quad[0][1] * s, 3, 0, 7);
+        g.fill();
+        g.fillText(`${c.score.toFixed(2)} sh${p.shape.toFixed(2)}`, p.cx * s - 24, Math.min(...c.quad.map((q) => q[1])) * s - 4);
+      }
+      const k = work ? (work.vw / work.w) * s : 0;
+      const lines = [`finder ${hasFinder ? `${lastScanMs} ms, ${cards.length} outlines` : detector === 'ready' ? 'not on this server' : detector}  corner model ${lastDetMs || '-'} ms`];
+      for (const t of tracks.values()) {
+        if (t.phase !== 'track' || !k) continue;
+        const { cx, cy, th } = t.pose;
+        const c = Math.cos(th);
+        const sn = Math.sin(th);
+        const corner = (u, v) => [(cx + u * c - v * sn) * k, (cy + u * sn + v * c) * k];
+        g.strokeStyle = t.lostMs > 0 ? '#f55' : '#5df';
+        g.setLineDash(t.lostMs > 0 ? [4, 3] : []);
+        g.beginPath();
+        [[-t.a / 2, -t.b / 2], [t.a / 2, -t.b / 2], [t.a / 2, t.b / 2], [-t.a / 2, t.b / 2]].forEach(([u, v], i) => {
+          const [x, y] = corner(u, v);
+          if (i) g.lineTo(x, y); else g.moveTo(x, y);
+        });
+        g.closePath();
+        g.stroke();
+        g.setLineDash([]);
+        g.fillStyle = g.strokeStyle;
+        g.fillText(`${t.id.slice(0, 3)} ${(t.score ?? 0).toFixed(2)}${t.lostMs > 0 ? ` lost ${(t.lostMs / 1000).toFixed(1)}s` : ''}`, ...corner(-t.a / 2, t.b / 2 + 11 / k));
+      }
+      const all = [...tracks.values()];
+      lines.push(`stickers ${all.filter((t) => t.phase === 'track').length} following, ${all.filter((t) => t.lostMs > 0).length} lost, ${all.filter((t) => t.phase !== 'track').length} no card  tick ${costMs.toFixed(1)} ms`);
+      if (lastJob) lines.push(`last search at ${lastJob.at} -> ${lastJob.found?.join(' | ') || (lastJob.identified ? 'from Identify' : 'nothing')}`);
+      const a = window.AutoRead?.debug?.();
+      if (a) {
+        lines.push(`held-card reader: ${a.enabled ? a.phase : 'off'}${a.card ? ` (${a.card})` : ''}  misses ${a.failedChecks}${a.timing ? `  last read: find ${a.timing.find} ms + lookup ${a.timing.read ?? '?'} ms` : ''}`);
+        if (a.lastLand?.finder) lines.push(`last put-down: ${a.lastLand.ms} ms after the read`);
+        lines.push(`table tagging: ${a.tagging ? 'on' : 'off'}, ${a.known} spots looked up${a.lastBoard ? `  last: ${a.lastBoard.top || 'no match'} (next ${a.lastBoard.next ?? '-'}) ${a.lastBoard.tagged || 'left alone'}` : ''}`);
+      }
+      const l = window.Identify?.lastLookup?.();
+      if (l) lines.push(`last lookup: ${l.ms} ms (server ${l.server ?? '?'} ms, ${l.looks ?? '?'} looks)  ${l.found ? `${l.top} vs ${l.next ?? '-'}${l.sure ? ' SURE' : ''}` : 'no card'}`);
+      text.textContent = lines.join('\n');
+    } finally {
+      debugBusy = false;
+    }
+  }
+  if (debugOn) setTimeout(() => setDebug(true), 1500);
+
   async function probe(x, y, opts = {}) {
     while (jobBusy) await new Promise((r) => setTimeout(r, 50));
     jobBusy = true;
@@ -1127,5 +1227,5 @@ window.Tracker = (() => {
     }
   }
 
-  return { init, setRoom, onData, sync, setEnabled, isEnabled: () => enabled, status, debug, probe, noteIdentified, findCards, stickerSpots, cardSize, hasFinder: () => hasFinder, load: () => loadDetector(), colours, zones: () => state?.zones?.[me] || {} };
+  return { init, setRoom, onData, sync, setEnabled, isEnabled: () => enabled, status, debug, probe, noteIdentified, findCards, stickerSpots, cardSize, hasFinder: () => hasFinder, load: () => loadDetector(), setDebug, isDebug: () => debugOn, colours, zones: () => state?.zones?.[me] || {}, piles: () => state?.piles?.[me] || {} };
 })();
