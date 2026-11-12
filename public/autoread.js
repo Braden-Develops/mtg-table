@@ -542,6 +542,14 @@ window.AutoRead = (() => {
         const k = label.get(c);
         return k?.sure && k.name === t.name && !tags.some((o) => o !== t && !o.unsure && o.name === t.name && o.on === c);
       }).sort((p, q) => reach(t, p) - reach(t, q))[0];
+      // Set loose from another card's tag, and every card that looks like its own already has its
+      // tag: it is a leftover second tag for a card that has one. It goes.
+      if (!home && loose.has(t.id) && table.some((c) => label.get(c)?.sure && label.get(c).name === t.name)) {
+        act({ type: 'stickerRemove', id: t.id });
+        loose.delete(t.id);
+        t.gone = true;
+        continue;
+      }
       if (!home) continue;
       act({ type: 'stickerMove', id: t.id, x: home.cx, y: home.cy });
       t.on = home;
