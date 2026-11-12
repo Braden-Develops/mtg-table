@@ -563,13 +563,26 @@ window.AutoRead = (() => {
     lastCheck = { tag: v.name, saw: top && `${top.card.name} ${top.score.toFixed(1)}`, next: next && +next.score.toFixed(1) };
     if (!r?.found || !top || !r.confident || top.score < AUTO_SCORE || top.score - (next?.score ?? 0) < AUTO_LEAD) return;
     if (top.card.name === v.name) { lastCheck.result = 'right card'; return; }
+    // Clearly a different card. Two tags have only changed places if the other card's tag is in
+    // turn sitting on this tag's card: look there before moving anything. (Swapping on the first
+    // look alone sent tags chasing each other round a full table.)
     const other = window.Tracker.stickerNamed?.(top.card.name, v.id);
-    if (!other) { lastCheck.result = 'wrong card, but no tag to swap with'; return; }
-    act({ type: 'stickerMove', id: v.id, x: other.x, y: other.y });
-    act({ type: 'stickerMove', id: other.id, x: v.x, y: v.y });
-    lastCheck.result = `swapped with ${top.card.name}`;
-    // The one that moved to the other spot hasn't been checked against the card there.
-    setTimeout(() => window.Tracker.markVerify?.(v.id), 1500);
+    const video = localVideo();
+    const doubt = () => {
+      // Not a simple swap: the tag becomes a question, with what was seen under it as the choices.
+      remember(v.id, r);
+      act({ type: 'stickerDoubt', id: v.id });
+      lastCheck.result = 'wrong card: asking';
+    };
+    if (!other || !video) return doubt();
+    lookUp(video, { cx: other.x, cy: other.y, a: v.a }, (r2) => {
+      const [top2, next2] = r2?.matches || [];
+      const sure2 = r2?.found && top2 && r2.confident && top2.score >= AUTO_SCORE && top2.score - (next2?.score ?? 0) >= AUTO_LEAD;
+      if (!sure2 || top2.card.name !== v.name) return doubt();
+      act({ type: 'stickerMove', id: v.id, x: other.x, y: other.y });
+      act({ type: 'stickerMove', id: other.id, x: v.x, y: v.y });
+      lastCheck.result = `swapped with ${top.card.name}`;
+    });
   }
   let lastCheck = null;
   const RECENT_MS = 90000; // a tag gone from my table this recently comes back without a question

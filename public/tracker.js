@@ -858,6 +858,10 @@ window.Tracker = (() => {
         || (doubt && Math.hypot(p.cx - at.cx, p.cy - at.cy) < t.b * 0.75);
       if (doubt && !near) continue;
       if (!near && taken(p)) continue;
+      // With the whole-picture finder, a card further off than a short slide isn't claimed by how
+      // it looks: on a full table that put tags on the wrong cards. A card that really was moved
+      // there has no tag, so the reader looks it up and brings this one over by name (liftedNamed).
+      if (hasFinder && !near && dist > t.b * 1.5) continue;
       // Further away than a short slide: it has to look a lot like ours.
       const bar = near ? RECOVER_NEAR : dist < t.b * 1.5 ? RECOVER_FAR : RECOVER_ANYWHERE;
       // The template is from before: its size may differ a bit, so rate() polishes around the found pose.
@@ -1049,7 +1053,9 @@ window.Tracker = (() => {
   // counters and all, instead of a new one being made.
   function liftedNamed(name) {
     for (const t of tracks.values()) {
-      if (t.phase !== 'track' || t.lostMs < 1000 || t.covered >= COVERED) continue;
+      // Its card can't be seen (and isn't just covered), or there was never a card under it.
+      const waiting = t.phase === 'none' || (t.phase === 'track' && t.lostMs >= 1000 && !(t.covered >= COVERED));
+      if (!waiting) continue;
       const s = state?.stickers?.[t.id];
       if (s && !s.unsure && s.items.some((it) => it.type === 'card' && it.name === name)) return { id: t.id };
     }
