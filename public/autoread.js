@@ -584,8 +584,16 @@ window.AutoRead = (() => {
         // Seen and named before: it is that card. No lookup, no question.
         known.push({ cx: c.cx, cy: c.cy });
         if (tagging) {
-          act({ type: 'stickerAdd', id: Math.random().toString(36).slice(2, 10), target: me, x: c.cx, y: c.cy, items: [{ ...k.card, type: 'card' }] });
-          bySight++;
+          // A tag of this card that has no card in view under it comes here; else a new one.
+          const idle = tags.find((t) => !t.gone && !t.unsure && t.name === k.name && !t.on && !t.claimed);
+          if (idle) {
+            idle.claimed = true;
+            act({ type: 'stickerMove', id: idle.id, x: c.cx, y: c.cy });
+            moved++;
+          } else {
+            act({ type: 'stickerAdd', id: Math.random().toString(36).slice(2, 10), target: me, x: c.cx, y: c.cy, items: [{ ...k.card, type: 'card' }] });
+            bySight++;
+          }
         }
         continue;
       }
@@ -641,7 +649,10 @@ window.AutoRead = (() => {
     // A tag of this card is waiting for it (the card was picked up and has been put down here, or
     // its tag was found sharing another card): that tag, with whatever counters it carries, moves
     // to the card.
-    const set = mine.find((t) => loose.has(t.id) && !t.unsure && t.name === top.card.name);
+    // (Any confirmed tag of this name whose card isn't in view under it will do, even one that is
+    // only covered by an arm: a second tag for the same card was the result of leaving those out.
+    // With two copies of a card, the covered copy gets a tag again by sight once it shows.)
+    const set = mine.find((t) => !t.unsure && t.name === top.card.name && (loose.has(t.id) || !t.seen));
     if (set) loose.delete(set.id);
     const waiting = set || window.Tracker.liftedNamed?.(top.card.name);
     if (waiting) {
