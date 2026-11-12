@@ -54,6 +54,12 @@
       </div>
 
       <button id="join-btn" class="primary">Join table</button>
+      <!-- Where card lookups will run, and the one-time download for running them here (localmatch.js).
+           Joining doesn't wait for it. -->
+      <div id="recog-status" class="recog-status" hidden>
+        <div class="recog-bar"><span></span></div>
+        <p class="recog-text muted small"></p>
+      </div>
     </div>
 
     <p id="lobby-error" class="error" hidden></p>
@@ -112,6 +118,7 @@
     <!-- Zone options: shown while the zone tool is picked -->
     <div class="subbar zone-bar" aria-label="Zones">
       <span class="zone-hint" title="Drag on empty table to draw the picked zone. Drag a box to move it, or its edge or corner to resize it.">Draw, move or resize:</span>
+      <button data-zone="play" class="chip" title="Where your cards in play lie. Cards outside it (and outside your graveyard and exile) are not tagged by themselves.">Play area</button>
       <button data-zone="command" class="chip">Command zone</button>
       <button data-zone="library" class="chip">Library</button>
       <button data-zone="graveyard" class="chip on">Graveyard</button>
@@ -282,6 +289,7 @@
   <script src="/static/picture.js"></script>
   <script src="/static/adjust.js"></script>
   <script src="/static/marks.js"></script>
+  <script src="/static/localmatch.js"></script>
   <script src="/static/identify.js"></script>
   <script src="/static/cardfind.js"></script>
   <script src="/static/tracker.js"></script>

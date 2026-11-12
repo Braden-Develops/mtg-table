@@ -19,7 +19,7 @@ window.AutoRead = (() => {
   const STEADY = 8; // a card held in a hand wobbles: this much more than calm still counts as held still
   const HELD_MIN = 0.3; // a held card's long side is at least this share of the picture's height
   const READ_GAP_MS = 2500; // between reads of different cards
-  const READS_PER_MIN = 15; // the server allows 20 a minute per player
+  const READS_PER_MIN = 34; // the server allows 40 a minute per player
   const readTimes = [];
   const readsLastMinute = () => {
     const now = performance.now();
@@ -449,7 +449,7 @@ window.AutoRead = (() => {
   // sticker. A match far ahead of every other card gets its tag; a likely one gets a tag marked as
   // a question ("Is it this?"); anything else is left alone. Either way the spot is remembered, so
   // the same card isn't asked about again (or re-tagged after its tag is removed) until it moves.
-  const BOARD_PER_MIN = 8; // lookups a minute, leaving room for held-up cards and Identify clicks
+  const BOARD_PER_MIN = 24; // lookups a minute (the server allows 40), leaving room for held-up cards and Identify clicks
   const AUTO_SCORE = 7.5;
   const AUTO_LEAD = 2.5;
   const ASK_SCORE = 5; // a guess at least this strong and this far ahead is shown as a question
@@ -476,18 +476,43 @@ window.AutoRead = (() => {
     const table = cards.filter(onTable);
     // Forget spots whose card has gone, so a card put there later is looked at.
     known = known.filter((k) => table.some((c) => far(k, c) < c.a * 0.3));
-    const untagged = table.filter((c) => !spots.some((s) => far({ cx: s.x, cy: s.y }, c) < c.b * 0.6)
+    // With a play area marked, only cards in it (or in the graveyard or exile) are looked at: not
+    // the deck box, a pile of spare cards, or whatever the finder makes of the picture's edge.
+    const inPlay = (c) => !zones.play || inZone(c, 'play') || inZone(c, 'graveyard') || inZone(c, 'exile');
+    const untagged = table.filter((c) => inPlay(c) && !spots.some((s) => far({ cx: s.x, cy: s.y }, c) < c.b * 0.6)
       && !known.some((k) => far(k, c) < c.a * 0.3) && !inZone(c, 'library') && !inZone(c, 'command'));
     const settled = untagged.filter((c) => boardSeen.some((o) => far(o, c) < c.a * 0.08));
     boardSeen = untagged;
-    if (!settled.length) { nextBoard = now + (untagged.length ? 250 : 1500); return; }
-    if (readsLastMinute() >= BOARD_PER_MIN) { nextBoard = now + 4000; return; }
-    const c = settled[0];
-    readTimes.push(now);
+    // (Lookups done on this computer cost the server nothing: no limit per minute then.)
+    const room = () => inFlight < MAX_FLIGHT && (window.LocalMatch?.ready() || readsLastMinute() < BOARD_PER_MIN);
+    // Tags that were moved to another card after a swap or shuffle: check each is on the right card.
+    for (const v of window.Tracker.toVerify?.() || []) {
+      if (!room()) break;
+      window.Tracker.verified(v.id);
+      lookUp(video, { cx: v.x, cy: v.y, a: v.a }, (r) => checkTag(v, r));
+    }
+    // Every untagged card that is lying still is looked up now, side by side: the answers come in
+    // as the server gets to them, not one card per look.
+    for (const c of settled) {
+      if (!room()) break;
+      known.push({ cx: c.cx, cy: c.cy });
+      lookUp(video, c, (r) => tagFrom(c, r, inZone));
+    }
+    nextBoard = now + (untagged.length > settled.length || inFlight ? 250 : 1200);
+  }
+
+  const MAX_FLIGHT = 6; // lookups under way at once
+  let inFlight = 0;
+  function lookUp(video, c, then) {
+    inFlight++;
+    readTimes.push(performance.now());
     const frac = 0.55;
-    const r = await window.Identify.read(video, c.cx, c.cy, frac, c.a / frac).catch(() => null);
-    known.push({ cx: c.cx, cy: c.cy });
-    nextBoard = performance.now() + 300;
+    window.Identify.read(video, c.cx, c.cy, frac, c.a / frac).catch(() => null)
+      .then(then).catch((err) => console.warn('Tagging table cards:', err)).finally(() => { inFlight--; });
+  }
+
+  // A lookup's answer for an untagged card at c.
+  function tagFrom(c, r, inZone) {
     const [top, next] = r?.matches || [];
     lastBoard = { at: [+c.cx.toFixed(2), +c.cy.toFixed(2)], top: top && `${top.card.name} ${top.score.toFixed(1)}`, next: next && +next.score.toFixed(1), found: !!r?.found, weak: !!r?.weak };
     // Nothing in the decks stands out: leave it. (On the server's first night every "best guess"
@@ -499,12 +524,34 @@ window.AutoRead = (() => {
     // forgets which spots it has looked at when it reloads): don't log it going there again.
     const pile = ['graveyard', 'exile'].find((zone) => inZone(c, zone));
     if (pile && (window.Tracker.piles?.()[pile] || []).at(-1)?.name === top.card.name) return;
-    const sure = r.confident && top.score >= AUTO_SCORE && lead >= AUTO_LEAD;
+    // Sure by score; or its tag was on this table a moment ago (knocked off while cards were
+    // moved about), so there is nothing to ask.
+    const back = !!window.Tracker.wasHere?.(top.card.name, RECENT_MS);
+    const sure = back || (r.confident && top.score >= AUTO_SCORE && lead >= AUTO_LEAD);
     const id = Math.random().toString(36).slice(2, 10);
     act({ type: 'stickerAdd', id, target: me, x: c.cx, y: c.cy, items: [{ ...top.card, type: 'card' }], unsure: !sure });
-    if (sure) window.Identify.feedback(r.id, top.card.name, 'auto');
-    lastBoard.tagged = sure ? 'sure' : 'asked';
+    if (sure && !back) window.Identify.feedback(r.id, top.card.name, 'auto');
+    lastBoard.tagged = back ? 'back again' : sure ? 'sure' : 'asked';
   }
+
+  // A lookup's answer for a tag that was moved to another card (v: { id, name, x, y }). If the
+  // card under it is clearly a different one that has a tag of its own elsewhere, the two tags
+  // are on each other's cards: they change places.
+  function checkTag(v, r) {
+    const [top, next] = r?.matches || [];
+    lastCheck = { tag: v.name, saw: top && `${top.card.name} ${top.score.toFixed(1)}`, next: next && +next.score.toFixed(1) };
+    if (!r?.found || !top || !r.confident || top.score < AUTO_SCORE || top.score - (next?.score ?? 0) < AUTO_LEAD) return;
+    if (top.card.name === v.name) { lastCheck.result = 'right card'; return; }
+    const other = window.Tracker.stickerNamed?.(top.card.name, v.id);
+    if (!other) { lastCheck.result = 'wrong card, but no tag to swap with'; return; }
+    act({ type: 'stickerMove', id: v.id, x: other.x, y: other.y });
+    act({ type: 'stickerMove', id: other.id, x: v.x, y: v.y });
+    lastCheck.result = `swapped with ${top.card.name}`;
+    // The one that moved to the other spot hasn't been checked against the card there.
+    setTimeout(() => window.Tracker.markVerify?.(v.id), 1500);
+  }
+  let lastCheck = null;
+  const RECENT_MS = 90000; // a tag gone from my table this recently comes back without a question
 
   function setTagging(on) {
     tagging = !!on;
@@ -524,7 +571,11 @@ window.AutoRead = (() => {
     const size = window.Tracker.cardSize?.();
     const onTable = (c) => c.sure && c.shape > 0.7 && (size ? c.b > size * 0.6 && c.b < size * 1.6 : c.b < HELD_MIN * 0.9);
     const spots = window.Tracker.stickerSpots?.() || [];
+    // A held card is put down in the play area or on a pile, if those are marked.
+    const zones = window.Tracker.zones?.() || {};
+    const within = (c, zone) => { const b = zones[zone]; return b && c.cx >= b[0] && c.cx <= b[2] && c.cy >= b[1] && c.cy <= b[3]; };
     const fresh = cards.filter((c) => onTable(c)
+      && (!zones.play || ['play', 'graveyard', 'exile', 'command', 'library'].some((zone) => within(c, zone)))
       && !hold.table.some((o) => far(o, c) < c.a * 0.6)
       && !spots.some((s) => far({ cx: s.x, cy: s.y }, c) < c.b * 0.6));
     const before = hold.landing || [];
@@ -711,7 +762,7 @@ window.AutoRead = (() => {
 
   let last = null;
   let lastLand = null;
-  const debug = () => ({ enabled, phase, card: hold?.card?.name, failedChecks, hasBg: !!bg, last, lastLand, lastSpots, timing, tagging, lastBoard, known: known.length });
+  const debug = () => ({ enabled, phase, card: hold?.card?.name, failedChecks, hasBg: !!bg, last, lastLand, lastSpots, timing, tagging, lastBoard, lastCheck, inFlight, known: known.length });
 
   return { init, setEnabled, isEnabled: () => enabled, setTagging, isTagging: () => tagging, debug, patches, cardSpots };
 })();

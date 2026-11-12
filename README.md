@@ -126,13 +126,27 @@ uses it; on a server without the file the app falls back to pointing the corner 
   with no sticker is looked up once. A clear match gets its tag; a likely one gets a tag marked
   "Is it this? ✓ ✕"; anything else is left alone. The same goes for the Identify tool: a clear
   match is tagged without the dialog, with Undo and "Not it".
-- **Zones** (tools bar): drag a box on your own camera for your command zone, library, graveyard
-  and exile. Drag a box to move it, an edge or corner to resize it. A stickered card that comes to
+- **Zones** (tools bar): drag a box on your own camera for your play area, command zone, library,
+  graveyard and exile. With a play area marked, only cards in it (or in the graveyard or exile)
+  are tagged by themselves. Drag a box to move it, an edge or corner to resize it. A stickered card that comes to
   rest in a box (or is last seen at one) loses its sticker, the log says where it went, and it is
   added to that pile's list. Hover a box for the list; click it to open the pile in the side panel
   (hover a card to see it, click to put it back on the table). Boxes are kept across games.
 - **Stickers after a shuffle:** when several stickers lose their cards at once, each card goes to
   the sticker it fits best, by the card's colours as well as its outline.
+
+**Where lookups run.** Naming a card (which deck card is this?) can be done by the server or by
+the player's own browser, with the same code (`public/cardmatch.js`, used by
+`server/recognize.js` and `public/match-worker.js`). The join page decides: it downloads the
+models (about 40 MB, once; they are kept in the browser's cache storage and reused on later
+visits), times a whole lookup on this computer, asks the server for its own time, and says which
+is used, for example "this computer 217 ms a card (on its graphics card), server 560 ms. Cards
+are read on this computer." The browser runs the models on the graphics card where it has
+WebGPU, else on one processor thread, which is usually slower than the server. For lookups in
+the browser the server sends the reference data of the decks at the table as a pack of about
+5 KB a printing (`/api/refs`). Lookups done in the browser are not in the capture log.
+`node scripts/recog-local-check.js` compares the browser's way with the server's on the saved
+lookups.
 
 **Training it** (`training/`, needs Python and a GPU; nothing here runs on the server):
 `fetch.py` downloads card pictures from Scryfall and background photos, `gen.py` pastes cards

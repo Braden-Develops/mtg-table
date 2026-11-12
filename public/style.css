@@ -339,6 +339,9 @@ body[data-tool="zone"] .zone-bar { display: flex; }
 .zone-box[data-zone="exile"] { border-color: rgba(255, 190, 90, .45); }
 .zone-box[data-zone="library"] { border-color: rgba(120, 190, 255, .45); }
 .zone-box[data-zone="command"] { border-color: rgba(190, 140, 255, .5); }
+.zone-box[data-zone="play"] { border-style: dotted; border-color: rgba(120, 230, 150, .3); border-radius: 12px; }
+.zone-box[data-zone="play"] span { left: auto; right: 4px; }
+body[data-tool="zone"] .zone-box[data-zone="play"] { background: none; }
 body[data-tool="zone"] .zone-box { border-width: 2px; border-color: #fff; background: rgba(255, 255, 255, .06); }
 body[data-tool="zone"] .zone-box span { color: #fff; background: rgba(0, 0, 0, .7); }
 /* Hovering a pile lists what has gone into it. */
@@ -365,6 +368,13 @@ body[data-tool="zone"] .zone-box span { color: #fff; background: rgba(0, 0, 0, .
 .zone-row .pile-x { margin-left: auto; padding: 0 6px; border: 0; background: transparent; color: var(--faint); cursor: pointer; }
 .zone-row .pile-x:hover { color: inherit; }
 .zone-row { cursor: pointer; }
+/* Join page: the card recognition download and where lookups will run. */
+.recog-status { margin-top: var(--sp-3); }
+.recog-status .recog-text { margin: var(--sp-2) 0 0; text-align: center; }
+.recog-bar { height: 4px; border-radius: 2px; background: rgba(255, 255, 255, .12); overflow: hidden; }
+.recog-bar > span { display: block; height: 100%; width: 0; background: var(--accent); transition: width .2s linear; }
+.recog-bar[hidden] { display: none; }
+
 /* Card debug (eye menu): outlines and timings drawn over your own camera. */
 .card-debug { position: absolute; inset: 0; width: 100%; height: 100%; pointer-events: none; }
 .card-debug-text {

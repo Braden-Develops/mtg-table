@@ -71,7 +71,7 @@ function getGame(room) {
     p.deck ??= null;
   }
   game.stickers ??= {}; // id -> { id, tile, x, y, items: [], by }
-  // Where each player's piles are on their camera: name -> { command | library | graveyard | exile: [x0, y0, x1, y1] }
+  // Where each player's piles (and play area) are on their camera: name -> { command | library | graveyard | exile | play: [x0, y0, x1, y1] }
   // (0-1 over their picture). Kept across games: the camera hasn't moved.
   game.zones ??= {};
   // What has gone into each pile this game: name -> { zone: [{ name, image, imageLarge }] }, newest last.
@@ -397,7 +397,8 @@ export function applyAction(room, by, action) {
     }
     // ----- zones -----
     case 'zoneSet': {
-      if (!player || !ZONES[action.zone]) return 'Bad action';
+      // 'play' is the play area: not a pile, just where cards on the table are worth looking at.
+      if (!player || !(ZONES[action.zone] || action.zone === 'play')) return 'Bad action';
       const box = Array.isArray(action.box) && action.box.length === 4 ? action.box.map(unit) : null;
       game.zones[target] ??= {};
       if (box && box[2] - box[0] > 0.02 && box[3] - box[1] > 0.02) game.zones[target][action.zone] = box;
