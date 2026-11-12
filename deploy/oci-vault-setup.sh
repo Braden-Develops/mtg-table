@@ -114,25 +114,25 @@ say "Budget"
 if [ -z "${BUDGET:-}" ] || [ -z "${ALERT_EMAIL:-}" ]; then
   echo "skipped (run again with BUDGET=<monthly amount> ALERT_EMAIL=<address> to add one)"
 else
-  BUD=$(oci budgets budget list -c "$T" --all --target-type ALL \
+  BUD=$(oci budgets budget budget list -c "$T" --all --target-type ALL \
     --query "data[?\"display-name\"=='mtg-table'].id | [0]" --raw-output)
   if [ -n "$BUD" ] && [ "$BUD" != "null" ]; then
-    oci budgets budget update --budget-id "$BUD" --amount "$BUDGET" --force >/dev/null
+    oci budgets budget budget update --budget-id "$BUD" --amount "$BUDGET" --force >/dev/null
     echo "already there; amount set to $BUDGET"
   else
-    BUD=$(oci budgets budget create -c "$T" --display-name mtg-table --amount "$BUDGET" --reset-period MONTHLY \
+    BUD=$(oci budgets budget budget create -c "$T" --display-name mtg-table --amount "$BUDGET" --reset-period MONTHLY \
       --target-type COMPARTMENT --targets "[\"$T\"]" --description "MTG Table monthly spend" \
       --query data.id --raw-output)
     echo "created ($BUDGET per month)"
   fi
   alert() { # name, type, percent
     local id
-    id=$(oci budgets alert-rule list --budget-id "$BUD" --all --query "data[?\"display-name\"=='$1'].id | [0]" --raw-output)
+    id=$(oci budgets budget alert-rule list --budget-id "$BUD" --all --query "data[?\"display-name\"=='$1'].id | [0]" --raw-output)
     if [ -n "$id" ] && [ "$id" != "null" ]; then
-      oci budgets alert-rule update --budget-id "$BUD" --alert-rule-id "$id" --recipients "$ALERT_EMAIL" --force >/dev/null
+      oci budgets budget alert-rule update --budget-id "$BUD" --alert-rule-id "$id" --recipients "$ALERT_EMAIL" --force >/dev/null
       echo "alert $1: already there (recipient updated)"
     else
-      oci budgets alert-rule create --budget-id "$BUD" --display-name "$1" --type "$2" --threshold "$3" \
+      oci budgets budget alert-rule create --budget-id "$BUD" --display-name "$1" --type "$2" --threshold "$3" \
         --threshold-type PERCENTAGE --recipients "$ALERT_EMAIL" \
         --message "MTG Table: Oracle Cloud spend alert ($1)" >/dev/null
       echo "alert $1: created"
