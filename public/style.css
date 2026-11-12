@@ -978,7 +978,8 @@ body.dragging-card, body.dragging-card * { cursor: grabbing !important; }
 @media (max-width: 480px) { .cam-row { grid-template-columns: 1fr; } .cam-row select { grid-column: auto; } }
 
 /* Identify */
-.identify-body { min-width: min(560px, 86vw); }
+/* (No minimum width: it was wider than the dialog, which gave a sideways scrollbar.) */
+.identify-body { overflow-x: hidden; }
 .id-result { display: flex; gap: var(--sp-5); align-items: flex-start; flex-wrap: wrap; }
 .id-big { width: 240px; max-width: 100%; border-radius: 13px; box-shadow: var(--shadow-md); }
 .id-info { flex: 1; min-width: 200px; }
