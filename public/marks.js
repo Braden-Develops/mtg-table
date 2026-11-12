@@ -762,7 +762,12 @@ window.Marks = (() => {
         // Answering the app's guess.
         const id = el.dataset.id;
         const s = state?.stickers?.[id];
-        if (answer === 'yes') act({ type: 'stickerConfirm', id });
+        if (answer === 'yes') {
+          act({ type: 'stickerConfirm', id });
+          // The player vouches for it: the reader learns what this card looks like here.
+          const card = s?.items.find((it) => it.type === 'card');
+          if (s?.tile === me && card) window.AutoRead?.learnAt?.(s.x, s.y, card);
+        }
         else if (answer === 'other') {
           // The other cards it considered, if this is my camera (my browser did the lookup);
           // otherwise the sticker's own editor, where the card can be changed by hand.

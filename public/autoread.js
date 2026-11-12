@@ -61,6 +61,7 @@ window.AutoRead = (() => {
   function init(opts) {
     ({ code, me, act } = opts);
     loadIgnored();
+    loadGallery();
     if (enabled) start();
   }
 
@@ -491,26 +492,83 @@ window.AutoRead = (() => {
     // stay left alone after being moved.
     const looks = ignored.length ? signatures(video, table) : null;
     const leftAlone = (c) => !!looks && ignored.some((sig) => alike(sig, looks.get(c)) >= SAME_LOOK);
-    const untagged = table.filter((c) => inPlay(c) && !leftAlone(c) && !spots.some((s) => far({ cx: s.x, cy: s.y }, c) < c.b * 0.6)
+    // What each card on the table looks like, and which known card (if any) that is. See "what
+    // each card looks like here" below: this, not a lookup, decides everything once a card has
+    // been named.
+    const prints = fingerprints(video, table);
+    const label = new Map(table.map((c) => [c, recall(prints.get(c))]));
+    const tags = window.Tracker.myTags?.() || [];
+    const reach = (t, c) => far({ cx: t.x, cy: t.y }, c);
+    for (const t of tags) t.on = table.filter((c) => reach(t, c) < c.b * 0.6).sort((p, q) => reach(t, p) - reach(t, q))[0] || null;
+    let moved = 0;
+    for (const t of tags) {
+      if (t.unsure) continue;
+      const under = t.on && label.get(t.on);
+      // On its own card: nothing to do but note how the card looks now (new spot, new light).
+      if (under?.sure && under.name === t.name) { learn(t.card, prints.get(t.on)); continue; }
+      if (!gallery.has(t.name)) continue; // never learnt what this one looks like: can't say
+      if (t.on && !under?.sure) continue; // can't tell what is under it: leave it be
+      // A different card is under it, or none: its own card, if in view without its tag, gets it.
+      const home = table.filter((c) => {
+        const k = label.get(c);
+        return k?.sure && k.name === t.name && !tags.some((o) => o !== t && !o.unsure && o.name === t.name && o.on === c);
+      }).sort((p, q) => reach(t, p) - reach(t, q))[0];
+      if (!home) continue;
+      act({ type: 'stickerMove', id: t.id, x: home.cx, y: home.cy });
+      t.on = home;
+      t.x = home.cx;
+      t.y = home.cy;
+      moved++;
+    }
+    const untagged = table.filter((c) => inPlay(c) && !leftAlone(c) && !tags.some((t) => t.on === c)
+      && !spots.some((sp) => far({ cx: sp.x, cy: sp.y }, c) < c.b * 0.6)
       && !known.some((k) => far(k, c) < c.a * 0.3) && !inZone(c, 'library') && !inZone(c, 'command'));
     const settled = untagged.filter((c) => boardSeen.some((o) => far(o, c) < c.a * 0.08));
     boardSeen = untagged;
     // (Lookups done on this computer cost the server nothing: no limit per minute then.)
     const room = () => inFlight < MAX_FLIGHT && (window.LocalMatch?.ready() || readsLastMinute() < BOARD_PER_MIN);
-    // Tags that were moved to another card after a swap or shuffle: check each is on the right card.
+    // Tags that were moved to another card after a swap or shuffle and whose card was never
+    // learnt by sight: check each with a lookup.
     for (const v of window.Tracker.toVerify?.() || []) {
+      if (gallery.has(v.name)) { window.Tracker.verified(v.id); continue; } // settled by sight above
       if (!room()) break;
       window.Tracker.verified(v.id);
       lookUp(video, { cx: v.x, cy: v.y, a: v.a }, (r) => checkTag(v, r));
     }
-    // Every untagged card that is lying still is looked up now, side by side: the answers come in
-    // as the server gets to them, not one card per look.
+    // A tag that was already here (from before the page loaded, or put on by hand) whose card has
+    // no fingerprint yet: one lookup of the card under it. If that agrees, the card is learnt.
+    for (const t of tags) {
+      if (t.unsure || !t.on || !t.seen || gallery.has(t.name) || vetted.has(t.id)) continue;
+      if (!room()) break;
+      vetted.add(t.id);
+      const print = prints.get(t.on);
+      lookUp(video, t.on, (r) => {
+        const [top, next] = r?.matches || [];
+        if (!r?.found || !top || !r.confident || top.score < AUTO_SCORE || top.score - (next?.score ?? 0) < AUTO_LEAD) return;
+        if (top.card.name === t.name) learn(t.card, print);
+        else { remember(t.id, r); act({ type: 'stickerDoubt', id: t.id }); } // a clearly different card is under it
+      });
+    }
+    let bySight = 0;
     for (const c of settled) {
+      const k = label.get(c);
+      if (k?.sure) {
+        // Seen and named before: it is that card. No lookup, no question.
+        known.push({ cx: c.cx, cy: c.cy });
+        if (tagging) {
+          act({ type: 'stickerAdd', id: Math.random().toString(36).slice(2, 10), target: me, x: c.cx, y: c.cy, items: [{ ...k.card, type: 'card' }] });
+          bySight++;
+        }
+        continue;
+      }
+      // Never seen before: every such card that is lying still is looked up now, side by side.
       if (!room()) break;
       known.push({ cx: c.cx, cy: c.cy });
-      lookUp(video, c, (r) => tagFrom(c, r, inZone));
+      const print = prints.get(c);
+      lookUp(video, c, (r) => tagFrom(c, r, inZone, print));
     }
-    nextBoard = now + (untagged.length > settled.length || inFlight ? 250 : 1200);
+    lastSight = { known: gallery.size, moved, bySight, labelled: [...label.values()].filter((k) => k?.sure).length, cards: table.length };
+    nextBoard = now + (untagged.length > settled.length || inFlight || moved ? 250 : 700);
   }
 
   const MAX_FLIGHT = 6; // lookups under way at once
@@ -524,7 +582,7 @@ window.AutoRead = (() => {
   }
 
   // A lookup's answer for an untagged card at c.
-  function tagFrom(c, r, inZone) {
+  function tagFrom(c, r, inZone, print = null) {
     const [top, next] = r?.matches || [];
     lastBoard = { at: [+c.cx.toFixed(2), +c.cy.toFixed(2)], top: top && `${top.card.name} ${top.score.toFixed(1)}`, next: next && +next.score.toFixed(1), found: !!r?.found, weak: !!r?.weak };
     // Nothing in the decks stands out: leave it. (On the server's first night every "best guess"
@@ -540,6 +598,8 @@ window.AutoRead = (() => {
     // moved about), so there is nothing to ask.
     const back = !!window.Tracker.wasHere?.(top.card.name, RECENT_MS);
     const sure = back || (r.confident && top.score >= AUTO_SCORE && lead >= AUTO_LEAD);
+    // Named for sure: from now on this card is known by how it looks through this camera.
+    if (sure) learn(top.card, print);
     // A tag of this card is waiting for it (the card was picked up and has been put down here):
     // that tag, with whatever counters it carries, moves to the card.
     const waiting = window.Tracker.liftedNamed?.(top.card.name);
@@ -586,6 +646,136 @@ window.AutoRead = (() => {
   }
   let lastCheck = null;
   const RECENT_MS = 90000; // a tag gone from my table this recently comes back without a question
+
+  // ---------- what each card looks like here ----------
+  // Naming a card from reference pictures is the hard, uncertain step: a webcam picture of a
+  // sleeved card under a lamp against a clean scan. But once a card HAS been named, how it looks
+  // through this camera, in this light, is known exactly, and telling it from the other cards on
+  // the table by that is easy and repeatable. Measured on a table of nine cards: a card against
+  // itself a moment later scores 0.91-1.00; against any different card 0.39-0.60 (two copies of
+  // one basic land: 0.69).
+  // So each named card gets fingerprints taken from the camera (the same low-resolution colour and
+  // contrast feature the matcher uses, of the card straightened by the finder's outline), and from
+  // then on the table look goes by those: a tag belongs on the card with its fingerprint, a
+  // known card without a tag gets its tag back with no lookup and no question. Lookups are only
+  // for cards never seen before. Kept for the browser session (two fingerprints a card, so a
+  // reload doesn't forget the table).
+  const FP_W = 96; // the straightened card the fingerprint is taken from
+  const FP_H = 134;
+  const KNOWN_AS = 0.78; // this alike to a known card's fingerprint...
+  const KNOWN_LEAD = 0.12; // ...and this far ahead of every other card's: it is that card
+  const SAMPLES = 5; // fingerprints kept per card (different spots and light)
+  const gallery = new Map(); // card name -> { card, samples: [[upright, turned]] }
+  let fpCanvas = null;
+  let lastSight = null;
+  const vetted = new Set(); // tags whose card has been looked up once to learn it
+
+  // Fingerprints of cards the finder outlined: Map(card -> [feature, feature turned upside down]).
+  function fingerprints(video, cards) {
+    const CM = window.CardMatch;
+    const out = new Map();
+    if (!CM || !cards.length || !video.videoWidth) return out;
+    const fw = Math.min(960, video.videoWidth);
+    const fh = Math.round((fw * video.videoHeight) / video.videoWidth);
+    if (!fpCanvas) fpCanvas = document.createElement('canvas');
+    if (fpCanvas.width !== fw || fpCanvas.height !== fh) { fpCanvas.width = fw; fpCanvas.height = fh; }
+    const ctx = fpCanvas.getContext('2d', { willReadFrequently: true });
+    ctx.drawImage(video, 0, 0, fw, fh);
+    const rgba = ctx.getImageData(0, 0, fw, fh).data;
+    const rgb = new Uint8Array(fw * fh * 3);
+    for (let i = 0, j = 0; i < rgba.length; i += 4, j += 3) {
+      rgb[j] = rgba[i];
+      rgb[j + 1] = rgba[i + 1];
+      rgb[j + 2] = rgba[i + 2];
+    }
+    for (const c of cards) {
+      const corners = window.CardFind.uprightCorners(c.quad.map(([x, y]) => [x * fw, y * fh]));
+      const I = CM.integral(CM.warp(rgb, fw, fh, corners, FP_W, FP_H), FP_W, FP_H);
+      out.set(c, [CM.lowFeature(CM.shrink(I)), CM.lowFeature(CM.shrink(I, 0, 0, 0, 0, true))]);
+    }
+    return out;
+  }
+  // How alike two fingerprints are (1 = the same card seen the same way), either way up.
+  const likeness = (p, q) => Math.max(window.CardMatch.dot(p[0], q[0]), window.CardMatch.dot(p[0], q[1]));
+  // Which known card a fingerprint is: { name, card, score, lead, sure }, or null if none are known.
+  function recall(print) {
+    if (!print || !gallery.size) return null;
+    let best = null;
+    let next = 0;
+    for (const [name, g] of gallery) {
+      let score = 0;
+      for (const sample of g.samples) score = Math.max(score, likeness(print, sample));
+      if (!best || score > best.score) {
+        if (best) next = Math.max(next, best.score);
+        best = { name, card: g.card, score };
+      } else next = Math.max(next, score);
+    }
+    best.lead = best.score - next;
+    best.sure = best.score >= KNOWN_AS && best.lead >= KNOWN_LEAD;
+    return best;
+  }
+  // This fingerprint is that card (named for sure, or vouched for by the player).
+  function learn(card, print) {
+    if (!print || !card?.name) return;
+    let g = gallery.get(card.name);
+    if (!g) gallery.set(card.name, g = { card: { ...card, type: 'card' }, samples: [] });
+    if (g.samples.some((sample) => likeness(print, sample) > 0.95)) return; // nothing new in it
+    g.samples.push(print);
+    if (g.samples.length > SAMPLES) g.samples.splice(1, 1); // the first stays; the oldest of the rest goes
+    clearTimeout(saveTimer);
+    saveTimer = setTimeout(saveGallery, 1500);
+  }
+  // Keeping it over a reload: the upright feature of the first and the newest fingerprint of each
+  // card, as bytes. (The upside-down feature is the same numbers in reverse order within each of
+  // its four planes, so it isn't stored.)
+  let saveTimer = null;
+  const galleryKey = () => `sight:${code}`;
+  function turned(f) {
+    const n = f.length / 4;
+    const out = new Float32Array(f.length);
+    for (let p = 0; p < 4; p++) for (let i = 0; i < n; i++) out[p * n + i] = f[p * n + n - 1 - i];
+    return out;
+  }
+  function saveGallery() {
+    try {
+      const packed = [...gallery].map(([name, g]) => {
+        const keep = g.samples.length > 1 ? [g.samples[0], g.samples[g.samples.length - 1]] : g.samples;
+        return [name, g.card, keep.map(([f]) => {
+          let max = 1e-9;
+          for (const v of f) max = Math.max(max, Math.abs(v));
+          let bytes = '';
+          for (const v of f) bytes += String.fromCharCode(Math.round((v / max) * 127) + 128);
+          return [max, btoa(bytes)];
+        })];
+      });
+      sessionStorage.setItem(galleryKey(), JSON.stringify(packed));
+    } catch { /* storage full or unavailable: the gallery just isn't kept */ }
+  }
+  function loadGallery() {
+    try {
+      for (const [name, card, samples] of JSON.parse(sessionStorage.getItem(galleryKey())) || []) {
+        gallery.set(name, {
+          card,
+          samples: samples.map(([max, text]) => {
+            const bytes = atob(text);
+            const f = new Float32Array(bytes.length);
+            for (let i = 0; i < f.length; i++) f[i] = ((bytes.charCodeAt(i) - 128) / 127) * max;
+            return [f, turned(f)];
+          }),
+        });
+      }
+    } catch { /* nothing kept */ }
+  }
+  // The player says the card at (x, y) of my camera is this one (✓ on a suggestion, or a pick).
+  async function learnAt(x, y, card) {
+    const video = localVideo();
+    if (!video?.videoWidth || !window.Tracker.hasFinder?.()) return;
+    const cards = await window.Tracker.findCards(video, 0.5, 0.5, 1);
+    const aspect = video.videoWidth / video.videoHeight;
+    const at = (cards || []).filter((c) => c.sure && c.shape > 0.75)
+      .map((c) => ({ c, d: Math.hypot((c.cx - x) * aspect, c.cy - y) })).filter((o) => o.d < o.c.b * 0.6).sort((p, q) => p.d - q.d)[0];
+    if (at) learn(card, fingerprints(video, [at.c]).get(at.c));
+  }
 
   // ---------- what the reader remembers about its suggestions ----------
   // The answer behind each tag it made, so "Other…" on a suggestion can show the other cards it
@@ -905,7 +1095,7 @@ window.AutoRead = (() => {
 
   let last = null;
   let lastLand = null;
-  const debug = () => ({ enabled, phase, card: hold?.card?.name, failedChecks, hasBg: !!bg, last, lastLand, lastSpots, timing, tagging, lastBoard, lastCheck, inFlight, known: known.length, ignored: ignored.length });
+  const debug = () => ({ enabled, phase, card: hold?.card?.name, failedChecks, hasBg: !!bg, last, lastLand, lastSpots, timing, tagging, lastBoard, lastCheck, lastSight, inFlight, known: known.length, ignored: ignored.length });
 
-  return { init, setEnabled, isEnabled: () => enabled, setTagging, isTagging: () => tagging, alternatives, rejected, debug, patches, cardSpots };
+  return { init, setEnabled, isEnabled: () => enabled, setTagging, isTagging: () => tagging, alternatives, rejected, learnAt, debug, patches, cardSpots };
 })();

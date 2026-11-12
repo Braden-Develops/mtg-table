@@ -1087,6 +1087,19 @@ window.Tracker = (() => {
     const t = tracks.get(id);
     if (t && (t.verifyTries || 0) < 3) t.verify = true;
   }
+  // My card tags as they stand: [{ id, name, card, unsure, x, y, seen }]. x, y: where the tag is
+  // (0-1 of the picture); seen: its card is in view under it right now.
+  function myTags() {
+    const out = [];
+    for (const s of Object.values(state?.stickers || {})) {
+      if (s.tile !== me || s.fixed) continue;
+      const card = s.items.find((it) => it.type === 'card');
+      if (!card) continue;
+      const t = tracks.get(s.id);
+      out.push({ id: s.id, name: card.name, card, unsure: !!s.unsure, x: t ? t.x : s.x, y: t ? t.y : s.y, seen: !!t && t.phase === 'track' && !t.lostMs });
+    }
+    return out;
+  }
   // Another of my stickers carrying this card, if any: { id, x, y }.
   function stickerNamed(name, except) {
     const s = Object.values(state?.stickers || {}).find((x) => x.tile === me && x.id !== except && x.items.some((it) => it.type === 'card' && it.name === name));
@@ -1357,6 +1370,7 @@ window.Tracker = (() => {
       if (a) {
         lines.push(`held-card reader: ${a.enabled ? a.phase : 'off'}${a.card ? ` (${a.card})` : ''}  misses ${a.failedChecks}${a.timing ? `  last read: find ${a.timing.find} ms + lookup ${a.timing.read ?? '?'} ms` : ''}`);
         if (a.lastLand?.finder) lines.push(`last put-down: ${a.lastLand.ms} ms after the read`);
+        if (a.lastSight) lines.push(`known by sight: ${a.lastSight.known} cards learnt; this look ${a.lastSight.labelled} of ${a.lastSight.cards} recognised, ${a.lastSight.moved} tags moved, ${a.lastSight.bySight} tagged with no lookup`);
         if (a.ignored) lines.push(`left alone (✕ on a suggestion): ${a.ignored} things`);
         lines.push(`table tagging: ${a.tagging ? 'on' : 'off'}, ${a.known} spots looked up${a.lastBoard ? `  last: ${a.lastBoard.top || 'no match'} (next ${a.lastBoard.next ?? '-'}) ${a.lastBoard.tagged || 'left alone'}` : ''}`);
       }
@@ -1381,5 +1395,5 @@ window.Tracker = (() => {
     }
   }
 
-  return { init, setRoom, onData, sync, setEnabled, isEnabled: () => enabled, status, debug, probe, noteIdentified, findCards, stickerSpots, cardSize, hasFinder: () => hasFinder, load: () => loadDetector(), setDebug, isDebug: () => debugOn, colours, hasState: () => !!state, removesLost: () => removesLost, setRemovesLost, liftedNamed, wasHere, toVerify, verified, markVerify, stickerNamed, zones: () => state?.zones?.[me] || {}, piles: () => state?.piles?.[me] || {} };
+  return { init, setRoom, onData, sync, setEnabled, isEnabled: () => enabled, status, debug, probe, noteIdentified, findCards, stickerSpots, cardSize, hasFinder: () => hasFinder, load: () => loadDetector(), setDebug, isDebug: () => debugOn, colours, hasState: () => !!state, myTags, removesLost: () => removesLost, setRemovesLost, liftedNamed, wasHere, toVerify, verified, markVerify, stickerNamed, zones: () => state?.zones?.[me] || {}, piles: () => state?.piles?.[me] || {} };
 })();

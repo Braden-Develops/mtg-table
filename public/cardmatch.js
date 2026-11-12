@@ -74,7 +74,7 @@
   }
   
   // Warp the quad `corners` ([TL,TR,BR,BL] in source pixels) of an RGB image to W x H.
-  function warp(rgb, sw, sh, corners) {
+  function warp(rgb, sw, sh, corners, W = 320, H = 448) {
     const dst = [[0, 0], [W, 0], [W, H], [0, H]];
     const m = homography(dst, corners); // maps output pixel -> source pixel
     // A card bigger than the output (held up to the camera): average a few samples per pixel.

@@ -291,6 +291,8 @@ window.Identify = (() => {
           // Chosen in place of a suggestion: that tag goes, this one takes its spot.
           if (current.replaceId) window.Marks.removeSticker(current.replaceId);
           window.Marks.placeCard(current.tileName, current.x, current.y, pick.card);
+          // Picked by the player on their own camera: the reader learns what this card looks like here.
+          if (current.tileName === me) window.AutoRead?.learnAt?.(current.x, current.y, pick.card);
         }
         $('identify-dialog').close();
         break;
