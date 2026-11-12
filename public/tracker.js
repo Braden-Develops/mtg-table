@@ -540,7 +540,7 @@ window.Tracker = (() => {
   // and at most every SCAN_MS per track. Takes the best clear match, preferring the one nearest to
   // where it was heading if two are about as good (two copies of a basic land).
   function scanAll(t, now) {
-    t.scanAt = now + SCAN_MS;
+    t.scanAt = now + (t.lostMs > 10000 ? 3000 : SCAN_MS);
     const groups = hasFinder ? SCAN_TURNS.slice(0, 2) : SCAN_TURNS;
     const turns = groups[t.scans % groups.length];
     t.scans++;
@@ -735,8 +735,11 @@ window.Tracker = (() => {
 
   // Where stickers sit on my camera now (0-1 over the picture), and a card's length on camera.
   function stickerSpots() {
-    const out = Object.values(state?.stickers || {}).filter((s) => s.tile === me).map((s) => ({ x: s.x, y: s.y }));
-    for (const t of tracks.values()) out.push({ x: t.x, y: t.y });
+    // (Not the tags waiting for a picked-up card: nothing is under those, and a card put down
+    // there is worth a look.)
+    const waiting = (id) => { const t = tracks.get(id); return !!t && t.phase === 'track' && t.lifted; };
+    const out = Object.values(state?.stickers || {}).filter((s) => s.tile === me && !waiting(s.id)).map((s) => ({ x: s.x, y: s.y }));
+    for (const t of tracks.values()) if (!waiting(t.id)) out.push({ x: t.x, y: t.y });
     return out;
   }
   const cardSize = () => (cardLen && work ? cardLen / work.h : null); // share of the picture's height
@@ -829,7 +832,8 @@ window.Tracker = (() => {
   // different (tapped under a tilted camera). Doubtful tracks only switch to a match at least as good.
   async function recover(video, t, now, doubt = false) {
     if (!doubt) t.recoverTries++;
-    t.retryAt = now + 700;
+    // (A card that has been gone a while, picked up or in a hand, is looked for less often.)
+    t.retryAt = now + Math.min(3000, 700 + t.lostMs / 8);
     // Where it was last seen for sure (a doubtful track may have drifted onto something else).
     const at = doubt || t.weakMs > 0 ? { ...t.good } : restingGuess(t);
     const cards = await locate(video, at.cx, at.cy, { near: t.b * (doubt ? 0.75 : 1.3), anywhere: !doubt, angle: t.pose.th, maxRuns: doubt ? 4 : 7 });
@@ -854,6 +858,10 @@ window.Tracker = (() => {
         || (doubt && Math.hypot(p.cx - at.cx, p.cy - at.cy) < t.b * 0.75);
       if (doubt && !near) continue;
       if (!near && taken(p)) continue;
+      // With the whole-picture finder, a card further off than a short slide isn't claimed by how
+      // it looks: on a full table that put tags on the wrong cards. A card that really was moved
+      // there has no tag, so the reader looks it up and brings this one over by name (liftedNamed).
+      if (hasFinder && !near && dist > t.b * 1.5) continue;
       // Further away than a short slide: it has to look a lot like ours.
       const bar = near ? RECOVER_NEAR : dist < t.b * 1.5 ? RECOVER_FAR : RECOVER_ANYWHERE;
       // The template is from before: its size may differ a bit, so rate() polishes around the found pose.
@@ -939,19 +947,28 @@ window.Tracker = (() => {
       const before = t.pose;
       step(t, dt, now);
       if (t.pose !== before && (t.pose.cx !== before.cx || t.pose.cy !== before.cy || t.pose.th !== before.th)) lastActive = now;
-      if (t.lostMs || t.weakMs || t.moved) lastActive = now;
+      // (A card gone for a while doesn't keep the fast pace going.)
+      if ((t.lostMs && t.lostMs < 10000) || t.weakMs || t.moved) lastActive = now;
     }
     if (tracks.size > following.length) lastActive = now; // still looking for cards
     // Everything lost at once means the camera moved or was covered, not that every card left.
     const lostCount = following.filter((t) => t.lostMs > 0).length;
     const disturbed = following.length >= 3 && lostCount / following.length >= 0.7;
     for (const t of following) {
-      if (!t.lostMs) { t.covered = 0; continue; }
+      if (!t.lostMs) { t.covered = 0; t.lifted = false; continue; }
       // Something is in the way (an arm across the table): the card hasn't gone anywhere we know of.
       t.covered = ringChanged(t);
       if (t.covered >= COVERED) t.coveredAt = now;
       if (now - (t.coveredAt || 0) < UNCOVERED_WAIT) continue;
-      if (t.lostMs > REMOVE_AFTER && t.recoverTries >= 2 && t.scans >= (hasFinder ? 3 : SCAN_TURNS.length) && !disturbed) removeLost(t);
+      if (t.lostMs > REMOVE_AFTER && t.recoverTries >= 2 && t.scans >= (hasFinder ? 3 : SCAN_TURNS.length) && !disturbed) {
+        // Not covered and nowhere to be found: it was picked up. Last seen at a pile, it went
+        // there. Otherwise its tag waits where it was (faded) until the card is seen again,
+        // by its picture here or by name when the reader looks it up; or, with "Tags go when
+        // cards leave" switched on, the tag is removed as before.
+        const last = t.good || t.pose;
+        if (removesLost || (work && zoneAt(last.cx / work.w, last.cy / work.h, 0.03))) removeLost(t);
+        else t.lifted = true;
+      }
     }
     // One whole-picture search per tick at most, for a card lost a little while.
     const scan = following.find((t) => t.lostMs > 250 && now >= (t.scanAt || 0));
@@ -1024,6 +1041,27 @@ window.Tracker = (() => {
     }
   }
 
+  // Tags of cards that can't be seen any more: removed after a few seconds, or (the default) kept.
+  let removesLost = false;
+  try { removesLost = localStorage.getItem('removeLost') === '1'; } catch { /* ignore */ }
+  function setRemovesLost(on) {
+    removesLost = !!on;
+    try { localStorage.setItem('removeLost', removesLost ? '1' : '0'); } catch { /* ignore */ }
+  }
+  // A tag of mine whose card was picked up, by the card's name: { id }. When the reader names a
+  // card it finds on the table (or one held up and put down), the waiting tag goes to it,
+  // counters and all, instead of a new one being made.
+  function liftedNamed(name) {
+    for (const t of tracks.values()) {
+      // Its card can't be seen (and isn't just covered), or there was never a card under it.
+      const waiting = t.phase === 'none' || (t.phase === 'track' && t.lostMs >= 1000 && !(t.covered >= COVERED));
+      if (!waiting) continue;
+      const s = state?.stickers?.[t.id];
+      if (s && !s.unsure && s.items.some((it) => it.type === 'card' && it.name === name)) return { id: t.id };
+    }
+    return null;
+  }
+
   // ---------- for the reader (autoread.js) ----------
   const recentlyGone = new Map(); // card name -> when its tag left my table
   const wasHere = (name, ms) => performance.now() - (recentlyGone.get(name) ?? -Infinity) < ms;
@@ -1048,6 +1086,19 @@ window.Tracker = (() => {
   function markVerify(id) {
     const t = tracks.get(id);
     if (t && (t.verifyTries || 0) < 3) t.verify = true;
+  }
+  // My card tags as they stand: [{ id, name, card, unsure, x, y, seen }]. x, y: where the tag is
+  // (0-1 of the picture); seen: its card is in view under it right now.
+  function myTags() {
+    const out = [];
+    for (const s of Object.values(state?.stickers || {})) {
+      if (s.tile !== me || s.fixed) continue;
+      const card = s.items.find((it) => it.type === 'card');
+      if (!card) continue;
+      const t = tracks.get(s.id);
+      out.push({ id: s.id, name: card.name, card, unsure: !!s.unsure, x: t ? t.x : s.x, y: t ? t.y : s.y, seen: !!t && t.phase === 'track' && !t.lostMs });
+    }
+    return out;
   }
   // Another of my stickers carrying this card, if any: { id, x, y }.
   function stickerNamed(name, except) {
@@ -1238,6 +1289,7 @@ window.Tracker = (() => {
   try { debugOn = localStorage.getItem('cardDebug') === '1'; } catch { /* ignore */ }
   let debugTimer = null;
   let debugBusy = false;
+  let thumbCanvas = null;
   function setDebug(on) {
     debugOn = !!on;
     try { localStorage.setItem('cardDebug', debugOn ? '1' : '0'); } catch { /* ignore */ }
@@ -1291,6 +1343,37 @@ window.Tracker = (() => {
         g.fill();
         g.fillText(`${c.score.toFixed(2)} sh${p.shape.toFixed(2)}`, p.cx * s - 24, Math.min(...c.quad.map((q) => q[1])) * s - 4);
       }
+      // Known by sight (autoread.js): under each card on the table, the little picture its
+      // fingerprint is made from and which known card that looks like (green: taken as that
+      // card; grey: not sure). Down the right-hand side, every card learnt so far with its
+      // fingerprints' pictures.
+      const sight = window.AutoRead?.sight?.();
+      if (sight) {
+        const tile = (thumb, x, y, scale) => {
+          if (!thumb) return;
+          if (!thumbCanvas) { thumbCanvas = document.createElement('canvas'); thumbCanvas.width = 32; thumbCanvas.height = 45; }
+          thumbCanvas.getContext('2d').putImageData(new ImageData(thumb, 32, 45), 0, 0);
+          g.drawImage(thumbCanvas, x, y, 32 * scale, 45 * scale);
+        };
+        g.imageSmoothingEnabled = false;
+        for (const c of sight.seen) {
+          const x = c.cx * w;
+          const y = (c.cy + c.b * 0.5) * h + 14;
+          tile(c.thumb, x - 34, y, 0.6);
+          g.fillStyle = c.as?.sure ? '#4f8' : '#bbb';
+          g.fillText(c.as ? `${c.as.name.slice(0, 18)} ${c.as.score.toFixed(2)} +${c.as.lead.toFixed(2)}` : 'no cards learnt yet', x - 12, y + 12);
+        }
+        let gy = 30;
+        g.fillStyle = '#cfe';
+        g.fillText(`learnt by sight: ${sight.known.length}`, w - 190, gy - 6);
+        for (const card of sight.known) {
+          if (gy > h - 60) break;
+          card.thumbs.forEach((thumb, i) => tile(thumb, w - 190 + i * 22, gy, 0.6));
+          g.fillStyle = '#cfe';
+          g.fillText(card.name.slice(0, 16), w - 190 + Math.max(1, card.thumbs.length) * 22 + 4, gy + 16);
+          gy += 31;
+        }
+      }
       const k = work ? (work.vw / work.w) * s : 0;
       const lines = [`finder ${hasFinder ? `${lastScanMs} ms, ${cards.length} outlines` : detector === 'ready' ? 'not on this server' : detector}  corner model ${lastDetMs || '-'} ms`];
       for (const t of tracks.values()) {
@@ -1310,7 +1393,7 @@ window.Tracker = (() => {
         g.stroke();
         g.setLineDash([]);
         g.fillStyle = g.strokeStyle;
-        g.fillText(`${t.id.slice(0, 3)} ${(t.score ?? 0).toFixed(2)}${t.lostMs > 0 ? ` lost ${(t.lostMs / 1000).toFixed(1)}s${t.covered >= COVERED ? ' COVERED' : ''} ring ${(t.covered || 0).toFixed(2)}` : ''}`, ...corner(-t.a / 2, t.b / 2 + 11 / k));
+        g.fillText(`${t.id.slice(0, 3)} ${(t.score ?? 0).toFixed(2)}${t.lostMs > 0 ? ` lost ${(t.lostMs / 1000).toFixed(1)}s${t.covered >= COVERED ? ' COVERED' : t.lifted ? ' PICKED UP' : ''} ring ${(t.covered || 0).toFixed(2)}` : ''}`, ...corner(-t.a / 2, t.b / 2 + 11 / k));
       }
       const all = [...tracks.values()];
       lines.push(`stickers ${all.filter((t) => t.phase === 'track').length} following, ${all.filter((t) => t.lostMs > 0).length} lost, ${all.filter((t) => t.phase !== 'track').length} no card  tick ${costMs.toFixed(1)} ms`);
@@ -1319,6 +1402,8 @@ window.Tracker = (() => {
       if (a) {
         lines.push(`held-card reader: ${a.enabled ? a.phase : 'off'}${a.card ? ` (${a.card})` : ''}  misses ${a.failedChecks}${a.timing ? `  last read: find ${a.timing.find} ms + lookup ${a.timing.read ?? '?'} ms` : ''}`);
         if (a.lastLand?.finder) lines.push(`last put-down: ${a.lastLand.ms} ms after the read`);
+        if (a.lastSight) lines.push(`known by sight: ${a.lastSight.known} cards learnt; this look ${a.lastSight.labelled} of ${a.lastSight.cards} recognised, ${a.lastSight.moved} tags moved, ${a.lastSight.bySight} tagged with no lookup${a.lastSight.loose ? `, ${a.lastSight.loose} tags looking for their card` : ''}\n  ${(a.lastSight.looks || []).join(' | ')}`);
+        if (a.ignored) lines.push(`left alone (✕ on a suggestion): ${a.ignored} things`);
         lines.push(`table tagging: ${a.tagging ? 'on' : 'off'}, ${a.known} spots looked up${a.lastBoard ? `  last: ${a.lastBoard.top || 'no match'} (next ${a.lastBoard.next ?? '-'}) ${a.lastBoard.tagged || 'left alone'}` : ''}`);
       }
       const l = window.Identify?.lastLookup?.();
@@ -1342,5 +1427,5 @@ window.Tracker = (() => {
     }
   }
 
-  return { init, setRoom, onData, sync, setEnabled, isEnabled: () => enabled, status, debug, probe, noteIdentified, findCards, stickerSpots, cardSize, hasFinder: () => hasFinder, load: () => loadDetector(), setDebug, isDebug: () => debugOn, colours, hasState: () => !!state, wasHere, toVerify, verified, markVerify, stickerNamed, zones: () => state?.zones?.[me] || {}, piles: () => state?.piles?.[me] || {} };
+  return { init, setRoom, onData, sync, setEnabled, isEnabled: () => enabled, status, debug, probe, noteIdentified, findCards, stickerSpots, cardSize, hasFinder: () => hasFinder, load: () => loadDetector(), setDebug, isDebug: () => debugOn, colours, hasState: () => !!state, myTags, removesLost: () => removesLost, setRemovesLost, liftedNamed, wasHere, toVerify, verified, markVerify, stickerNamed, zones: () => state?.zones?.[me] || {}, piles: () => state?.piles?.[me] || {} };
 })();

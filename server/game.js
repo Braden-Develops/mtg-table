@@ -340,6 +340,13 @@ export function applyAction(room, by, action) {
       s.y = unit(action.y);
       break; // moves aren't logged
     }
+    case 'stickerDoubt': {
+      // The reader looked under a tag and saw a different card: it becomes a question again.
+      const s = game.stickers[action.id];
+      if (!s) return 'Sticker is gone';
+      s.unsure = true;
+      break; // not logged
+    }
     case 'stickerConfirm': {
       const s = game.stickers[action.id];
       if (!s) return 'Sticker is gone';

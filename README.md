@@ -132,6 +132,35 @@ uses it; on a server without the file the app falls back to pointing the corner 
   rest in a box (or is last seen at one) loses its sticker, the log says where it went, and it is
   added to that pile's list. Hover a box for the list; click it to open the pile in the side panel
   (hover a card to see it, click to put it back on the table). Boxes are kept across games.
+- **Answering a suggestion.** A tag marked "Is it this?" has three answers: ✓ keeps it; "Other…"
+  shows the other cards the lookup considered, or a search by name, and puts the one you pick in
+  its place; ✕ removes it and tells the reader not to suggest anything for that thing again (it
+  is remembered by its colours for the rest of the browser session, so it stays left alone after
+  being moved).
+- **Picked-up cards keep their tag.** When a tagged card can't be seen and nothing is covering
+  it, its tag waits where it was, faded, and goes back on the card (with its counters) when the
+  card is seen again: by its picture, or by name when the reader looks up a card put down on the
+  table or held up to the camera. Tags are no longer removed by themselves, except when the card
+  was last seen at one of your piles. Eye menu → "Tags stay when cards are picked up" switches
+  the old behaviour (removed after a few seconds) back on.
+- **Known by sight.** Naming a card against reference scans is the uncertain step; once a card
+  has been named, how it looks through this camera is known exactly. So each named card gets
+  fingerprints taken from the camera (`public/autoread.js`, "what each card looks like here"), and
+  from then on the table look goes by those: a tag belongs on the card with its fingerprint and
+  is moved there, and a known card without a tag gets it back with no lookup and no question.
+  Lookups are only for cards not seen before. Measured on one table: a card against itself
+  0.91-1.00 (0.97-1.00 after being moved), against any other card 0.39-0.66. Fingerprints are kept
+  for the browser session. Card debug lists what each card looks most like, and by how much.
+- **Basic lands are told by their symbol.** A basic has hundreds of printings, far more than
+  there are reference pictures for, so its art is the wrong thing to match. The text box of
+  almost every one is the same big mana symbol: the matcher compares that with symbols taken from
+  a few sets' scans (`data/basic-symbols.json`, built at first start) before the art. Full-art and
+  old-frame basics without the symbol box still go by art.
+- **Forgetting.** Deleting a tag by hand, or pressing ✕ on a suggestion, also forgets any
+  fingerprint that said the card under it was that card.
+- **One card tag per card.** Two on one card means something went wrong: the one that belongs
+  stays, a suggestion among the rest is dropped, and a confirmed one goes looking for its own
+  card.
 - **Stickers after a shuffle:** when several stickers lose their cards at once, each card goes to
   the sticker it fits best, by the card's colours as well as its outline.
 

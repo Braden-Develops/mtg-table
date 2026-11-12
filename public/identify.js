@@ -288,7 +288,11 @@ window.Identify = (() => {
       case 'place':
         if (pick) {
           feedback(current.result.id, pick.card.name, 'place');
+          // Chosen in place of a suggestion: that tag goes, this one takes its spot.
+          if (current.replaceId) window.Marks.removeSticker(current.replaceId);
           window.Marks.placeCard(current.tileName, current.x, current.y, pick.card);
+          // Picked by the player on their own camera: the reader learns what this card looks like here.
+          if (current.tileName === me) window.AutoRead?.learnAt?.(current.x, current.y, pick.card);
         }
         $('identify-dialog').close();
         break;
@@ -299,6 +303,7 @@ window.Identify = (() => {
         break;
       case 'search':
         feedback(current.result?.id, null, 'search');
+        if (current.replaceId) window.Marks.removeSticker(current.replaceId);
         $('identify-dialog').close();
         window.Marks.openLookup();
         break;
@@ -306,10 +311,18 @@ window.Identify = (() => {
     }
   }
 
+  // Show a lookup's answer in the dialog so another of its cards can be picked ("Other…" on a
+  // suggested tag, or on a held card it wasn't sure of). replaceId: the suggested tag it replaces.
+  function choose(tileName, x, y, result, replaceId = null) {
+    current = { tileName, x, y, status: 'done', result, pick: 0, replaceId };
+    render();
+    if (!$('identify-dialog').open) $('identify-dialog').showModal();
+  }
+
   // Read a card on my own camera without the dialog (cards held up to the camera). frac: the crop's
   // size as a share of the picture's short side. Resolves with the server's answer.
   // share: the card's width as a share of that crop's.
   const read = (video, x, y, frac, share) => ask(video, x, y, me, frac, 800, share);
 
-  return { init, setRoom, onData, clickAt, read, feedback, lastLookup: () => lastLookup };
+  return { init, setRoom, onData, clickAt, read, feedback, choose, lastLookup: () => lastLookup };
 })();

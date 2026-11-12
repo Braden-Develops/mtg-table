@@ -9,7 +9,7 @@
 import fs from 'node:fs';
 import path from 'node:path';
 import { DATA_DIR } from './lib.js';
-import { identify, indexCards } from '../server/recognize.js';
+import { identify, indexCards, learnSymbols } from '../server/recognize.js';
 
 const verbose = process.argv.includes('-v');
 const read = (file) => { try { return JSON.parse(fs.readFileSync(file, 'utf8')); } catch { return null; } };
@@ -36,6 +36,7 @@ if (!cases.length) {
 const names = [...new Set(cases.flatMap((c) => c.result.candidates))];
 console.log(`${cases.length} labelled lookups, ${names.length} cards. Fetching any missing reference pictures...`);
 await indexCards(names.map((name) => ({ name })));
+await learnSymbols(); // basic lands are told by their symbol
 
 const tally = { right: 0, sure: 0, wrongSure: 0, noCard: 0, ms: 0, runs: 0 };
 const none = { n: 0, quiet: 0 };
