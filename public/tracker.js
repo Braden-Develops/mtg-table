@@ -843,9 +843,10 @@ window.Tracker = (() => {
     // are on, aren't ours (a hand covering our card must not send its sticker to a neighbour).
     const k = work.vw / work.w;
     const lostAt = now - t.lostMs;
-    const earlier = scanHistory.filter((s) => s.at < lostAt - 100).pop();
+    // (The last few looks from before, not just one: a card under glare is missed now and then.)
+    const earlier = scanHistory.filter((s) => s.at < lostAt - 100).slice(-6);
     const taken = (p) => [...tracks.values()].some((o) => o !== t && o.phase === 'track' && Math.hypot(o.pose.cx - p.cx, o.pose.cy - p.cy) < o.a * 0.5)
-      || (earlier && earlier.spots.some(([sx, sy]) => Math.hypot(sx / k - p.cx, sy / k - p.cy) < p.a * 0.4));
+      || earlier.some((look) => look.spots.some(([sx, sy]) => Math.hypot(sx / k - p.cx, sy / k - p.cy) < p.a * 0.4));
     // Several stickers may have lost their cards at once (cards swapped or shuffled about): a card
     // goes to the sticker it fits best, not to whichever sticker asks first or was nearest.
     const rivals = doubt ? [] : [...tracks.values()].filter((o) => o !== t && o.phase === 'track' && o.lostMs > 0);
@@ -854,8 +855,10 @@ window.Tracker = (() => {
       // Only a card where ours was actually last seen gets the low bar (tapped in place); one near
       // where we guess it slid to may be a different card.
       const dist = Math.hypot(p.cx - t.pose.cx, p.cy - t.pose.cy);
-      const near = dist < t.b * 0.75
-        || (doubt && Math.hypot(p.cx - at.cx, p.cy - at.cy) < t.b * 0.75);
+      // (Under half a card's length: cards laid edge to edge are 0.72 of a length apart, and the
+      // card next door must not count as "where ours was".)
+      const near = dist < t.b * 0.45
+        || (doubt && Math.hypot(p.cx - at.cx, p.cy - at.cy) < t.b * 0.45);
       if (doubt && !near) continue;
       if (!near && taken(p)) continue;
       // With the whole-picture finder, a card further off than a short slide isn't claimed by how
@@ -879,6 +882,10 @@ window.Tracker = (() => {
       const mine = cards.filter((p) => p.score > 0.55 && p.shape > 0.85
         && Math.abs(p.b / t.b - 1) < 0.25
         && Math.hypot(p.cx - t.pose.cx, p.cy - t.pose.cy) < t.b * 1.3
+        // (Not a neighbour that was lying there all along: in a grid of cards, a tag whose own card
+        // the finder missed for a moment walked along the row onto other cards. With the finder and
+        // nothing known from before, only a card right where ours was.)
+        && (Math.hypot(p.cx - t.pose.cx, p.cy - t.pose.cy) < t.b * 0.4 || (!taken(p) && (!hasFinder || earlier.length > 0)))
         && (!p.fit || (p.fit.colour >= 0.25 && !theirs(p, p.fit.total)))
         && ![...tracks.values()].some((o) => o !== t && o.phase === 'track' && !o.lostMs
           && Math.hypot(o.pose.cx - p.cx, o.pose.cy - p.cy) < o.a * 0.5));
@@ -1408,7 +1415,7 @@ window.Tracker = (() => {
       }
       const l = window.Identify?.lastLookup?.();
       const lm = window.LocalMatch?.status?.();
-      if (lm && lm.state !== 'off') lines.push(`lookups run on ${lm.mode === 'local' ? 'this computer' : 'the server'}: here ${lm.localMs ?? '?'} ms, server ${lm.serverMs ?? '?'} ms${lm.refs ? `, ${lm.refs.references} references of ${lm.refs.cards} cards` : ''}${lm.state === 'ready' ? '' : ` (${lm.state})`}`);
+      if (lm && lm.state !== 'off') lines.push(`lookups run on ${lm.mode === 'local' ? 'this computer' : 'the server'}: here ${lm.localMs ?? '?'} ms, server ${lm.serverMs ?? '?'} ms${lm.refs ? `, ${lm.refs.references} references of ${lm.refs.cards} cards` : ''}${lm.state === 'ready' ? '' : ` (${lm.state})`}${lm.waiting ? `; server still learning ${lm.waiting} cards` : ''}${lm.fetching ? '; fetching new references' : ''}`);
       if (l) lines.push(`last lookup: ${l.ms} ms (${l.where || `server ${l.server ?? '?'} ms`}, ${l.looks ?? '?'} looks)  ${l.found ? `${l.top} vs ${l.next ?? '-'}${l.sure ? ' SURE' : ''}` : 'no card'}`);
       text.textContent = lines.join('\n');
     } finally {

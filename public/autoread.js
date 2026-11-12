@@ -534,7 +534,7 @@ window.AutoRead = (() => {
       // Its card by a nose: the tag is being followed on this card (t.seen) and nothing else it
       // knows looks more like it, but the fingerprint on file is a poor one (taken with a hand in
       // the way, say). A better one is taken now.
-      if (under && under.name === t.name && t.seen && under.score >= 0.5) { learn(t.card, prints.get(t.on)); continue; }
+      if (under && under.name === t.name && t.seen && under.score >= 0.62) { learn(t.card, prints.get(t.on)); continue; }
       if (!gallery.has(t.name)) continue; // never learnt what this one looks like: can't say
       if (t.on && !under?.sure) continue; // can't tell what is under it: leave it be
       // A different card is under it, or none: its own card, if in view without its tag, gets it.
@@ -562,7 +562,11 @@ window.AutoRead = (() => {
     const settled = untagged.filter((c) => boardSeen.some((o) => far(o, c) < c.a * 0.08));
     boardSeen = untagged;
     // (Lookups done on this computer cost the server nothing: no limit per minute then.)
-    const room = () => inFlight < MAX_FLIGHT && (window.LocalMatch?.ready() || readsLastMinute() < BOARD_PER_MIN);
+    // (And none at all while a newly loaded deck is still being learnt: see LocalMatch.learning.)
+    const learning = !!window.LocalMatch?.learning?.();
+    if (learning && !wasLearning) toast('Learning the cards of the new deck: tags start in a moment.', [], 6000);
+    wasLearning = learning;
+    const room = () => !learning && inFlight < MAX_FLIGHT && (window.LocalMatch?.ready() || readsLastMinute() < BOARD_PER_MIN);
     // Tags that were moved to another card after a swap or shuffle and whose card was never
     // learnt by sight: check each with a lookup.
     for (const v of window.Tracker.toVerify?.() || []) {
@@ -622,6 +626,8 @@ window.AutoRead = (() => {
 
   const MAX_FLIGHT = 6; // lookups under way at once
   let inFlight = 0;
+  let wasLearning = false;
+  let retries = []; // [{ cx, cy, n }] spots whose card couldn't be named yet, and how often it was tried
   function lookUp(video, c, then) {
     inFlight++;
     readTimes.push(performance.now());
@@ -638,7 +644,19 @@ window.AutoRead = (() => {
     // from 5.3 up was right, some only 0.9 ahead of the next card; a card that isn't in any deck
     // tops out around 4.5.)
     const lead = top ? top.score - (next?.score ?? 0) : 0;
-    if (!tagging || !r?.found || !top || top.score < ASK_SCORE || lead < ASK_LEAD) return;
+    if (!tagging || !r?.found || !top || top.score < ASK_SCORE || lead < ASK_LEAD) {
+      // One poor look (glare on a sleeve, a blurred frame) isn't the last word: the card is looked
+      // at again after a moment, a few times, further apart each time. It used to be left alone
+      // until something else on the table changed, so some cards took minutes to get a tag.
+      if (tagging) {
+        const near = (k) => Math.hypot(k.cx - c.cx, k.cy - c.cy) < c.a * 0.3;
+        let again = retries.find(near);
+        if (!again) { again = { cx: c.cx, cy: c.cy, n: 0 }; retries.push(again); if (retries.length > 60) retries.shift(); }
+        const wait = [1200, 3000, 8000, 20000][again.n++];
+        if (wait) setTimeout(() => { known = known.filter((k) => !near(k)); }, wait);
+      }
+      return;
+    }
     // The card on top of the graveyard or exile pile is already on that pile's list (the page
     // forgets which spots it has looked at when it reloads): don't log it going there again.
     const pile = ['graveyard', 'exile'].find((zone) => inZone(c, zone));
@@ -1197,6 +1215,13 @@ window.AutoRead = (() => {
   const debug = () => ({ enabled, phase, card: hold?.card?.name, failedChecks, hasBg: !!bg, last, lastLand, lastSpots, timing, tagging, lastBoard, lastCheck, lastSight, inFlight, known: known.length, ignored: ignored.length });
 
   return { init, setEnabled, isEnabled: () => enabled, setTagging, isTagging: () => tagging, alternatives, rejected, learnAt, unlearnAt, debug,
+    // One fresh lookup of the card at (x, y) of my camera, for "Other…" on a suggestion.
+    lookAgain: (x, y) => {
+      const video = localVideo();
+      if (!video?.videoWidth) return Promise.resolve(null);
+      const size = window.Tracker.cardSize?.();
+      return window.Identify.read(video, x, y, 0.55, size ? (size * 0.716) / 0.55 : 0).catch(() => null);
+    },
     // A tag of mine at (x, y) was deleted by hand: don't put one straight back, and forget that the card there looks like `name`.
     removedAt: (x, y, name) => { known.push({ cx: x, cy: y }); return unlearnAt(x, y, name); },
     // For the card debug overlay: every known card's fingerprints as little pictures, and the last look's cards.

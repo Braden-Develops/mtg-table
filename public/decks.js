@@ -75,6 +75,7 @@ window.Decks = (() => {
       const data = await res.json();
       if (!res.ok) throw new Error(data.error || 'Could not load the deck');
       cache.delete(me);
+      window.LocalMatch?.deckChanged?.();
       $('deck-status').textContent = '';
       $('deck-dialog').close();
       viewing = me;

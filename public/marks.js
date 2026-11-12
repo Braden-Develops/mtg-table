@@ -772,7 +772,16 @@ window.Marks = (() => {
           // The other cards it considered, if this is my camera (my browser did the lookup);
           // otherwise the sticker's own editor, where the card can be changed by hand.
           const seen = s?.tile === me ? window.AutoRead?.alternatives?.(id) : null;
-          if (seen && s) window.Identify.choose(s.tile, s.x, s.y, seen, id);
+          if (s?.tile === me && window.AutoRead?.lookAgain) {
+            // Look at the card afresh: the guess may be from before the deck's cards were all
+            // learnt, when the right card wasn't among the ones it could answer with.
+            window.AutoRead.lookAgain(s.x, s.y).then((fresh) => {
+              const answer = fresh?.found && fresh.matches?.length ? fresh : seen;
+              if (!state?.stickers?.[id]) return; // removed meanwhile
+              if (answer) window.Identify.choose(s.tile, s.x, s.y, answer, id);
+              else openEditor({ mode: 'edit', id });
+            });
+          } else if (seen && s) window.Identify.choose(s.tile, s.x, s.y, seen, id);
           else openEditor({ mode: 'edit', id });
         } else {
           // Not something to tag: on my own camera the reader remembers what it looks like.
