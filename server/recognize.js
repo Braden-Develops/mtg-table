@@ -24,6 +24,14 @@ import { artworks } from './scryfall.js';
 const CF = globalThis.CardFind;
 const POSE_MODEL = path.join(ROOT, 'models', 'mtg_4kp_s_r4b.onnx');
 const EMBED_MODEL = path.join(ROOT, 'models', 'mtg_embed_fp32.onnx');
+// The whole-picture card finder (our own model, see training/): one cheap look outlines the card,
+// where the corner model needs three or more looks at guessed frames.
+const FINDER_MODEL = path.join(ROOT, 'cardfinder', 'card_finder.onnx');
+// How the card's outline is found: 'finder' (the finder alone), 'finder+pose' (the finder, then one
+// look by the corner model to sharpen it), 'pose' (the corner model's own search, as before).
+const FIND_MODE = process.env.RECOG_FIND || 'finder';
+const FW = 640;
+const FH = 384;
 const CACHE_FILE = path.join(DATA_DIR, 'references-v4.bin');
 const W = 320;
 const H = 448;
@@ -46,6 +54,7 @@ function getSessions() {
     return {
       pose: await ort.InferenceSession.create(POSE_MODEL, opts),
       embed: await ort.InferenceSession.create(EMBED_MODEL, opts),
+      finder: fs.existsSync(FINDER_MODEL) ? await ort.InferenceSession.create(FINDER_MODEL, opts) : null,
     };
   })();
   return sessions;
@@ -379,9 +388,84 @@ function poseRunner(rgb, sw, sh) {
   });
 }
 
+// Every card in the picture, by the whole-picture finder: [{ score, quad }], corners in picture
+// pixels, the card's own top-left first. null without the model.
+async function finderCards(rgb, sw, sh) {
+  const { finder } = await getSessions();
+  if (!finder) return null;
+  // The picture fitted inside the model's 640x384 input, grey around it.
+  const k = Math.min(FW / sw, FH / sh);
+  const nw = Math.max(1, Math.round(sw * k));
+  const nh = Math.max(1, Math.round(sh * k));
+  const ox = Math.floor((FW - nw) / 2);
+  const oy = Math.floor((FH - nh) / 2);
+  const small = await sharp(rgb, { raw: { width: sw, height: sh, channels: 3 } }).resize(nw, nh, { fit: 'fill' }).raw().toBuffer();
+  const plane = FW * FH;
+  const data = new Float32Array(3 * plane).fill(114 / 255);
+  for (let y = 0; y < nh; y++) {
+    for (let x = 0; x < nw; x++) {
+      const i = (y * nw + x) * 3;
+      const o = (y + oy) * FW + x + ox;
+      data[o] = small[i] / 255;
+      data[plane + o] = small[i + 1] / 255;
+      data[2 * plane + o] = small[i + 2] / 255;
+    }
+  }
+  const out = await serial(() => finder.run({ [finder.inputNames[0]]: new ort.Tensor('float32', data, [1, 3, FH, FW]) }));
+  const t = out[finder.outputNames[0]];
+  const d = t.data;
+  const n = t.dims[2]; // rows: cx, cy, w, h, score, then x, y, visibility for each corner
+  const found = [];
+  for (let i = 0; i < n; i++) {
+    const score = d[4 * n + i];
+    if (score < 0.25) continue;
+    found.push({
+      score, box: [d[i] - d[2 * n + i] / 2, d[n + i] - d[3 * n + i] / 2, d[i] + d[2 * n + i] / 2, d[n + i] + d[3 * n + i] / 2],
+      quad: [0, 1, 2, 3].map((c) => [(d[(5 + 3 * c) * n + i] - ox) / k, (d[(6 + 3 * c) * n + i] - oy) / k]),
+    });
+  }
+  found.sort((a, b) => b.score - a.score);
+  const kept = [];
+  for (const c of found) {
+    const overlaps = kept.some((o) => {
+      const iw = Math.min(c.box[2], o.box[2]) - Math.max(c.box[0], o.box[0]);
+      const ih = Math.min(c.box[3], o.box[3]) - Math.max(c.box[1], o.box[1]);
+      if (iw <= 0 || ih <= 0) return false;
+      const inter = iw * ih;
+      return inter / ((c.box[2] - c.box[0]) * (c.box[3] - c.box[1]) + (o.box[2] - o.box[0]) * (o.box[3] - o.box[1]) - inter) > 0.5;
+    });
+    if (!overlaps) kept.push(c);
+  }
+  return kept;
+}
+
 // The card under `hint` ({x, y} in 0-1 of the picture). size: its likely short side in pixels, if known.
-export function findCard(rgb, sw, sh, hint, size = 0) {
-  return CF.locate(poseRunner(rgb, sw, sh), [hint.x * sw, hint.y * sh], {
+// Resolves with { card, sure, runs, others } (see CardFind.locate).
+export async function findCard(rgb, sw, sh, hint, size = 0) {
+  const at = [hint.x * sw, hint.y * sh];
+  const found = FIND_MODE === 'pose' ? null : await finderCards(rgb, sw, sh);
+  if (found) {
+    const cards = found.filter((c) => c.score >= 0.5).map((c) => ({ ...CF.quadPose(c.quad), score: c.score }))
+      .filter((p) => p.shape > 0.6);
+    // The card the point is on; failing that, one whose middle is close by.
+    const dist = (p) => Math.hypot(p.cx - at[0], p.cy - at[1]);
+    let card = cards.filter((p) => CF.insideQuad(at, p.quad)).sort((p, q) => q.score - p.score)[0]
+      || cards.filter((p) => dist(p) < p.b * 0.75).sort((p, q) => dist(p) - dist(q))[0];
+    if (card) {
+      let runs = 1;
+      if (FIND_MODE === 'finder+pose') {
+        // One look by the corner model, framed on the finder's outline, to sharpen the corners.
+        runs = 2;
+        const f = CF.frameFor(card);
+        const sharp1 = (await poseRunner(rgb, sw, sh)(f)).map((p) => ({ ...CF.quadPose(p.quad), score: p.score }))
+          .filter((p) => p.score >= 0.8 && p.shape > 0.6 && Math.hypot(p.cx - card.cx, p.cy - card.cy) < card.a * 0.15 && Math.abs(p.a / card.a - 1) < 0.15)
+          .sort((p, q) => q.score - p.score)[0];
+        if (sharp1) card = sharp1;
+      }
+      return { card, sure: true, runs, others: [], via: 'finder' };
+    }
+  }
+  return CF.locate(poseRunner(rgb, sw, sh), at, {
     span: Math.min(sw, sh), bounds: [sw, sh], size, maxRuns: 14,
   });
 }

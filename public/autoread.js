@@ -494,6 +494,10 @@ window.AutoRead = (() => {
     // tops out around 4.5.)
     const lead = top ? top.score - (next?.score ?? 0) : 0;
     if (!tagging || !r?.found || !top || top.score < ASK_SCORE || lead < ASK_LEAD) return;
+    // The card on top of the graveyard or exile pile is already on that pile's list (the page
+    // forgets which spots it has looked at when it reloads): don't log it going there again.
+    const pile = ['graveyard', 'exile'].find((zone) => inZone(c, zone));
+    if (pile && (window.Tracker.piles?.()[pile] || []).at(-1)?.name === top.card.name) return;
     const sure = r.confident && top.score >= AUTO_SCORE && lead >= AUTO_LEAD;
     const id = Math.random().toString(36).slice(2, 10);
     act({ type: 'stickerAdd', id, target: me, x: c.cx, y: c.cy, items: [{ ...top.card, type: 'card' }], unsure: !sure });

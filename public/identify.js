@@ -5,6 +5,7 @@
 window.Identify = (() => {
   const TOPIC = 'identify';
   const OWNER_TIMEOUT_MS = 3000;
+  let lastLookup = null;
   const AUTO_SCORE = 7.5; // a match this strong...
   const AUTO_LEAD = 2.5; // ...and this far ahead of the next card is tagged without asking
   const CROP = 0.55; // crop a square this fraction of the frame's short side around the click
@@ -65,8 +66,14 @@ window.Identify = (() => {
       if (len) share = (len * 0.716 * c.vh) / c.side;
     }
     if (share > 0.02 && share < 0.9) q.set('s', share.toFixed(3));
+    const sent = performance.now();
     const res = await fetch(`/api/identify?${q}`, { method: 'POST', headers: { 'Content-Type': 'image/jpeg' }, body: blob });
     const data = await res.json();
+    // For the card debug overlay.
+    lastLookup = {
+      ms: Math.round(performance.now() - sent), server: data.ms, looks: data.runs, found: !!data.found, sure: !!data.confident,
+      top: data.matches?.[0] && `${data.matches[0].card.name} ${data.matches[0].score}`, next: data.matches?.[1]?.score,
+    };
     if (!res.ok) throw new Error(data.error || 'Recognition failed.');
     // The card's outline over the whole picture (0-1), so a sticker placed from this can follow
     // the card straight away instead of the tracker searching for it again.
@@ -288,5 +295,5 @@ window.Identify = (() => {
   // share: the card's width as a share of that crop's.
   const read = (video, x, y, frac, share) => ask(video, x, y, me, frac, 800, share);
 
-  return { init, setRoom, onData, clickAt, read, feedback };
+  return { init, setRoom, onData, clickAt, read, feedback, lastLookup: () => lastLookup };
 })();
