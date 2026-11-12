@@ -16,7 +16,7 @@ import {
 } from './game.js';
 import { autocomplete, namedCard } from './scryfall.js';
 import { allDeckCards, getDeck, loadDeck, removeDeck, roomDecks } from './decks.js';
-import { identify, indexCards, labelCapture, modelsAvailable, warmUp } from './recognize.js';
+import { identify, indexCards, indexStatus, labelCapture, lookupMs, modelsAvailable, refPack, warmUp } from './recognize.js';
 import { handleAccessLog, startAccessLog } from './accesslog.js';
 import { startCost } from './cost.js';
 import { count, handleMetrics, noteToken, startMetrics } from './metrics.js';
@@ -55,8 +55,14 @@ const PUBLIC_DIR = path.join(ROOT, 'public');
 const LIVEKIT_CLIENT = path.join(ROOT, 'node_modules', 'livekit-client', 'dist', 'livekit-client.umd.js');
 // Card tracking runs in each player's own browser (onnxruntime-web + the corner model), not here.
 const ORT_DIR = path.join(ROOT, 'node_modules', 'onnxruntime-web', 'dist');
-const ORT_FILES = /^(ort\.wasm\.min\.mjs|ort-wasm-simd-threaded\.(mjs|wasm))$/;
-const POSE_FILES = { 'pose.onnx': 'mtg_4kp_s_r4b.onnx', 'mtg_4kp_s_r4b.onnx.data': 'mtg_4kp_s_r4b.onnx.data' };
+// (The webgpu build and its "asyncify" files are for match-worker.js, which runs the models on
+// the player's graphics card when the browser allows it.)
+const ORT_FILES = /^(ort\.(wasm|webgpu)\.min\.mjs|ort-wasm-simd-threaded\.((jsep|asyncify)\.)?(mjs|wasm))$/;
+const POSE_FILES = {
+  'pose.onnx': 'mtg_4kp_s_r4b.onnx', 'mtg_4kp_s_r4b.onnx.data': 'mtg_4kp_s_r4b.onnx.data',
+  // The embedding model, for browsers that match cards themselves (see /api/recog/info).
+  'embed.onnx': 'mtg_embed_fp32.onnx', 'mtg_embed_fp32.onnx.data': 'mtg_embed_fp32.onnx.data',
+};
 // The whole-picture card finder is our own model (see training/), small enough to live in the
 // repository, so it deploys with the code.
 const FINDER_FILE = path.join(ROOT, 'cardfinder', 'card_finder.onnx');
@@ -359,6 +365,35 @@ async function handle(req, res) {
     if (!invite) return;
     const deck = getDeck(invite.room, url.searchParams.get('player') || invite.name);
     return deck ? send(res, 200, deck) : send(res, 404, { error: 'No deck loaded' });
+  }
+
+  // What a browser needs to decide whether to match cards itself, and to do it: how fast lookups
+  // are here, which model files to fetch (with a version, so a cached copy is known to be current),
+  // and the reference pack for the decks at this table.
+  if (req.method === 'GET' && p === '/api/recog/info') {
+    const invite = guest(url.searchParams.get('code'), 'model', 60);
+    if (!invite) return;
+    if (!modelsAvailable()) return send(res, 200, { available: false });
+    const fileInfo = (served, file) => {
+      try { const st = fs.statSync(file); return { name: served, bytes: st.size, v: `${st.size}-${Math.round(st.mtimeMs)}` }; } catch { return null; }
+    };
+    const files = [fileInfo('cards.onnx', FINDER_FILE), fileInfo('embed.onnx', path.join(ROOT, 'models', POSE_FILES['embed.onnx'])),
+      fileInfo('mtg_embed_fp32.onnx.data', path.join(ROOT, 'models', 'mtg_embed_fp32.onnx.data'))];
+    const decks = roomDecks(invite.room);
+    const pack = decks.length ? refPack(decks.flatMap((d) => d.cards.map((card) => ({ card, owner: d.owner })))) : null;
+    return send(res, 200, {
+      available: files.every(Boolean), files, serverMs: await lookupMs(),
+      refs: pack ? { hash: pack.hash, bytes: pack.buffer.length, cards: pack.cards } : null, waiting: indexStatus().waiting,
+    });
+  }
+  if (req.method === 'GET' && p === '/api/refs') {
+    const invite = guest(url.searchParams.get('code'), 'model', 60);
+    if (!invite) return;
+    const decks = roomDecks(invite.room);
+    const pack = decks.length ? refPack(decks.flatMap((d) => d.cards.map((card) => ({ card, owner: d.owner })))) : null;
+    if (!pack) return send(res, 404, { error: 'No decks at this table yet' });
+    res.writeHead(200, { ...SECURITY_HEADERS, 'Content-Type': 'application/octet-stream', 'Content-Length': pack.buffer.length, 'Cache-Control': 'private, max-age=31536000, immutable', 'X-Refs-Hash': pack.hash });
+    return res.end(pack.buffer);
   }
 
   // Card recognition. Body: JPEG of the area around the click. Query: code, player (whose video),

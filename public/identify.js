@@ -58,6 +58,22 @@ window.Identify = (() => {
   async function ask(video, x, y, player, frac, maxPx, share) {
     const c = crop(video, x, y, frac, maxPx);
     if (!c) throw new Error('That video is not playing yet.');
+    // On this computer, when it reads cards faster than the server (see localmatch.js).
+    if (window.LocalMatch?.ready()) {
+      const began = performance.now();
+      const local = await window.LocalMatch.identify(c.canvas, { x: c.hx, y: c.hy });
+      if (local) {
+        lastLookup = {
+          ms: Math.round(performance.now() - began), server: null, looks: local.runs, found: !!local.found, sure: !!local.confident,
+          top: local.matches?.[0] && `${local.matches[0].card.name} ${local.matches[0].score}`, next: local.matches?.[1]?.score, where: 'this computer',
+        };
+        if (Array.isArray(local.quad) && local.quad.length === 4) {
+          local.frameQuad = local.quad.map(([qx, qy]) => [(c.left + qx * c.side) / c.vw, (c.top + qy * c.side) / c.vh]);
+          if (video === localVideo()) window.Tracker?.noteIdentified(x, y, local.frameQuad);
+        }
+        return local;
+      }
+    }
     const blob = await new Promise((resolve) => c.canvas.toBlob(resolve, 'image/jpeg', 0.92));
     const q = new URLSearchParams({ code, player, x: c.hx.toFixed(4), y: c.hy.toFixed(4) });
     // On my own camera, card tracking knows how big the cards on the table are.

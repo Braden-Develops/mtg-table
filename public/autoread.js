@@ -480,7 +480,8 @@ window.AutoRead = (() => {
       && !known.some((k) => far(k, c) < c.a * 0.3) && !inZone(c, 'library') && !inZone(c, 'command'));
     const settled = untagged.filter((c) => boardSeen.some((o) => far(o, c) < c.a * 0.08));
     boardSeen = untagged;
-    const room = () => inFlight < MAX_FLIGHT && readsLastMinute() < BOARD_PER_MIN;
+    // (Lookups done on this computer cost the server nothing: no limit per minute then.)
+    const room = () => inFlight < MAX_FLIGHT && (window.LocalMatch?.ready() || readsLastMinute() < BOARD_PER_MIN);
     // Tags that were moved to another card after a swap or shuffle: check each is on the right card.
     for (const v of window.Tracker.toVerify?.() || []) {
       if (!room()) break;

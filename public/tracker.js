@@ -1322,7 +1322,9 @@ window.Tracker = (() => {
         lines.push(`table tagging: ${a.tagging ? 'on' : 'off'}, ${a.known} spots looked up${a.lastBoard ? `  last: ${a.lastBoard.top || 'no match'} (next ${a.lastBoard.next ?? '-'}) ${a.lastBoard.tagged || 'left alone'}` : ''}`);
       }
       const l = window.Identify?.lastLookup?.();
-      if (l) lines.push(`last lookup: ${l.ms} ms (server ${l.server ?? '?'} ms, ${l.looks ?? '?'} looks)  ${l.found ? `${l.top} vs ${l.next ?? '-'}${l.sure ? ' SURE' : ''}` : 'no card'}`);
+      const lm = window.LocalMatch?.status?.();
+      if (lm && lm.state !== 'off') lines.push(`lookups run on ${lm.mode === 'local' ? 'this computer' : 'the server'}: here ${lm.localMs ?? '?'} ms, server ${lm.serverMs ?? '?'} ms${lm.refs ? `, ${lm.refs.references} references of ${lm.refs.cards} cards` : ''}${lm.state === 'ready' ? '' : ` (${lm.state})`}`);
+      if (l) lines.push(`last lookup: ${l.ms} ms (${l.where || `server ${l.server ?? '?'} ms`}, ${l.looks ?? '?'} looks)  ${l.found ? `${l.top} vs ${l.next ?? '-'}${l.sure ? ' SURE' : ''}` : 'no card'}`);
       text.textContent = lines.join('\n');
     } finally {
       debugBusy = false;

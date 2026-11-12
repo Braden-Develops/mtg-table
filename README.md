@@ -134,6 +134,19 @@ uses it; on a server without the file the app falls back to pointing the corner 
 - **Stickers after a shuffle:** when several stickers lose their cards at once, each card goes to
   the sticker it fits best, by the card's colours as well as its outline.
 
+**Where lookups run.** Naming a card (which deck card is this?) can be done by the server or by
+the player's own browser, with the same code (`public/cardmatch.js`, used by
+`server/recognize.js` and `public/match-worker.js`). The join page decides: it downloads the
+models (about 40 MB, once; they are kept in the browser's cache storage and reused on later
+visits), times a whole lookup on this computer, asks the server for its own time, and says which
+is used, for example "this computer 217 ms a card (on its graphics card), server 560 ms. Cards
+are read on this computer." The browser runs the models on the graphics card where it has
+WebGPU, else on one processor thread, which is usually slower than the server. For lookups in
+the browser the server sends the reference data of the decks at the table as a pack of about
+5 KB a printing (`/api/refs`). Lookups done in the browser are not in the capture log.
+`node scripts/recog-local-check.js` compares the browser's way with the server's on the saved
+lookups.
+
 **Training it** (`training/`, needs Python and a GPU; nothing here runs on the server):
 `fetch.py` downloads card pictures from Scryfall and background photos, `gen.py` pastes cards
 onto playmats, desks and photos as a webcam would see them (sleeves, glare, hands, blur),

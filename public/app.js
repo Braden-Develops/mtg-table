@@ -38,6 +38,8 @@
     if (savedQuality && QUALITY[savedQuality]) $('quality-select').value = savedQuality;
 
     $('lobby-body').hidden = false;
+    // Card recognition: fetch the models and see whether this computer or the server is faster.
+    window.LocalMatch?.start(code);
     await startPreview(store.get('cameraId'));
     await fillDeviceLists();
 

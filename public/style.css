@@ -365,6 +365,13 @@ body[data-tool="zone"] .zone-box span { color: #fff; background: rgba(0, 0, 0, .
 .zone-row .pile-x { margin-left: auto; padding: 0 6px; border: 0; background: transparent; color: var(--faint); cursor: pointer; }
 .zone-row .pile-x:hover { color: inherit; }
 .zone-row { cursor: pointer; }
+/* Join page: the card recognition download and where lookups will run. */
+.recog-status { margin-top: var(--sp-3); }
+.recog-status .recog-text { margin: var(--sp-2) 0 0; text-align: center; }
+.recog-bar { height: 4px; border-radius: 2px; background: rgba(255, 255, 255, .12); overflow: hidden; }
+.recog-bar > span { display: block; height: 100%; width: 0; background: var(--accent); transition: width .2s linear; }
+.recog-bar[hidden] { display: none; }
+
 /* Card debug (eye menu): outlines and timings drawn over your own camera. */
 .card-debug { position: absolute; inset: 0; width: 100%; height: 100%; pointer-events: none; }
 .card-debug-text {

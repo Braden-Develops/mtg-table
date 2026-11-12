@@ -54,6 +54,12 @@
       </div>
 
       <button id="join-btn" class="primary">Join table</button>
+      <!-- Where card lookups will run, and the one-time download for running them here (localmatch.js).
+           Joining doesn't wait for it. -->
+      <div id="recog-status" class="recog-status" hidden>
+        <div class="recog-bar"><span></span></div>
+        <p class="recog-text muted small"></p>
+      </div>
     </div>
 
     <p id="lobby-error" class="error" hidden></p>
@@ -282,6 +288,7 @@
   <script src="/static/picture.js"></script>
   <script src="/static/adjust.js"></script>
   <script src="/static/marks.js"></script>
+  <script src="/static/localmatch.js"></script>
   <script src="/static/identify.js"></script>
   <script src="/static/cardfind.js"></script>
   <script src="/static/tracker.js"></script>

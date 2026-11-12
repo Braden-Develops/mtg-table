@@ -13,15 +13,19 @@
 //     Each is turned into "how far above the other reference pictures" and the two are added.
 // Reference pictures come from Scryfall (every different-looking printing of each deck card) and
 // their vectors are cached in data/references-v4.bin.
+import crypto from 'node:crypto';
 import fs from 'node:fs';
 import path from 'node:path';
 import ort from 'onnxruntime-node';
 import sharp from 'sharp';
 import '../public/cardfind.js';
+import '../public/cardmatch.js';
 import { DATA_DIR, ROOT } from '../scripts/lib.js';
 import { artworks } from './scryfall.js';
 
 const CF = globalThis.CardFind;
+const CM = globalThis.CardMatch;
+const { W, H, DIM, LOW, sampleInto, integral, shrink, lowFeature } = CM;
 const POSE_MODEL = path.join(ROOT, 'models', 'mtg_4kp_s_r4b.onnx');
 const EMBED_MODEL = path.join(ROOT, 'models', 'mtg_embed_fp32.onnx');
 // The whole-picture card finder (our own model, see training/): one cheap look outlines the card,
@@ -33,9 +37,6 @@ const FIND_MODE = process.env.RECOG_FIND || 'finder';
 const FW = 640;
 const FH = 384;
 const CACHE_FILE = path.join(DATA_DIR, 'references-v4.bin');
-const W = 320;
-const H = 448;
-const DIM = 256;
 const POSE_SIZE = 640;
 const MEAN = [0.485, 0.456, 0.406];
 const STD = [0.229, 0.224, 0.225];
@@ -97,11 +98,6 @@ const RENDITIONS = [
   async (img, base) => sharp(await sharp(base).resize(160).toBuffer()).resize(W, H, { fit: 'fill' }).blur(0.8),
   async (img, base) => sharp(await sharp(base).resize(220).toBuffer()).resize(W, H, { fit: 'fill' }).blur(0.6),
 ];
-const LW = 32; // low-res comparison size
-const LH = 45;
-const LM = 3; // margin left out (card border, sleeve)
-const LN = (LW - 2 * LM) * (LH - 2 * LM);
-const LOW = LN * 4; // 3 colour planes + 1 local-contrast plane
 const KEY = 48; // bytes per record key: '<scryfall id>/<face>'
 const RECORD = KEY + (RENDITIONS.length * DIM + LOW) * 4;
 
@@ -160,206 +156,6 @@ async function embedRgb(pictures) {
     for (let i = 0; i < v.length; i++) v[i] /= norm;
     return v;
   });
-}
-
-const dot = (a, b) => {
-  let s = 0;
-  for (let i = 0; i < a.length; i++) s += a[i] * b[i];
-  return s;
-};
-
-// Solve the 3x3 homography that maps 4 src points onto 4 dst points.
-function homography(src, dst) {
-  const A = [];
-  const b = [];
-  for (let i = 0; i < 4; i++) {
-    const [x, y] = src[i];
-    const [u, v] = dst[i];
-    A.push([x, y, 1, 0, 0, 0, -u * x, -u * y]);
-    b.push(u);
-    A.push([0, 0, 0, x, y, 1, -v * x, -v * y]);
-    b.push(v);
-  }
-  // Gaussian elimination with partial pivoting.
-  for (let c = 0; c < 8; c++) {
-    let p = c;
-    for (let r = c + 1; r < 8; r++) if (Math.abs(A[r][c]) > Math.abs(A[p][c])) p = r;
-    [A[c], A[p]] = [A[p], A[c]];
-    [b[c], b[p]] = [b[p], b[c]];
-    for (let r = 0; r < 8; r++) {
-      if (r === c || !A[c][c]) continue;
-      const f = A[r][c] / A[c][c];
-      for (let k = c; k < 8; k++) A[r][k] -= f * A[c][k];
-      b[r] -= f * b[c];
-    }
-  }
-  const h = b.map((v, i) => v / A[i][i]);
-  return [...h, 1];
-}
-
-// Brightness-weighted sample of an RGB picture at (sx, sy), added into acc. Outside: nearest edge pixel.
-function sampleInto(acc, rgb, sw, sh, sx, sy) {
-  if (sx < 0) sx = 0; else if (sx > sw - 1.001) sx = sw - 1.001;
-  if (sy < 0) sy = 0; else if (sy > sh - 1.001) sy = sh - 1.001;
-  const x0 = sx | 0;
-  const y0 = sy | 0;
-  const fx = sx - x0;
-  const fy = sy - y0;
-  const i = (y0 * sw + x0) * 3;
-  const j = i + sw * 3;
-  const w00 = (1 - fx) * (1 - fy);
-  const w10 = fx * (1 - fy);
-  const w01 = (1 - fx) * fy;
-  const w11 = fx * fy;
-  acc[0] += rgb[i] * w00 + rgb[i + 3] * w10 + rgb[j] * w01 + rgb[j + 3] * w11;
-  acc[1] += rgb[i + 1] * w00 + rgb[i + 4] * w10 + rgb[j + 1] * w01 + rgb[j + 4] * w11;
-  acc[2] += rgb[i + 2] * w00 + rgb[i + 5] * w10 + rgb[j + 2] * w01 + rgb[j + 5] * w11;
-}
-
-// Warp the quad `corners` ([TL,TR,BR,BL] in source pixels) of an RGB image to W x H.
-function warp(rgb, sw, sh, corners) {
-  const dst = [[0, 0], [W, 0], [W, H], [0, H]];
-  const m = homography(dst, corners); // maps output pixel -> source pixel
-  // A card bigger than the output (held up to the camera): average a few samples per pixel.
-  const big = Math.hypot(corners[1][0] - corners[0][0], corners[1][1] - corners[0][1]) / W;
-  const taps = big > 2.5 ? 3 : big > 1.4 ? 2 : 1;
-  const out = Buffer.alloc(W * H * 3);
-  const acc = [0, 0, 0];
-  for (let y = 0; y < H; y++) {
-    for (let x = 0; x < W; x++) {
-      acc[0] = 0; acc[1] = 0; acc[2] = 0;
-      for (let ty = 0; ty < taps; ty++) {
-        for (let tx = 0; tx < taps; tx++) {
-          const px = x + (tx + 0.5) / taps;
-          const py = y + (ty + 0.5) / taps;
-          const d = m[6] * px + m[7] * py + m[8];
-          sampleInto(acc, rgb, sw, sh, (m[0] * px + m[1] * py + m[2]) / d - 0.5, (m[3] * px + m[4] * py + m[5]) / d - 0.5);
-        }
-      }
-      const o = (y * W + x) * 3;
-      const n = taps * taps;
-      out[o] = acc[0] / n;
-      out[o + 1] = acc[1] / n;
-      out[o + 2] = acc[2] / n;
-    }
-  }
-  return out;
-}
-
-// ---------- low-resolution comparison ----------
-// Integral images of an RGB picture, for fast box averages.
-function integral(rgb, w, h) {
-  const S = [0, 1, 2].map(() => new Float64Array((w + 1) * (h + 1)));
-  const W1 = w + 1;
-  for (let y = 0; y < h; y++) {
-    let r = 0;
-    let g = 0;
-    let b = 0;
-    for (let x = 0; x < w; x++) {
-      const i = (y * w + x) * 3;
-      r += rgb[i];
-      g += rgb[i + 1];
-      b += rgb[i + 2];
-      const o = (y + 1) * W1 + x + 1;
-      S[0][o] = S[0][o - W1] + r;
-      S[1][o] = S[1][o - W1] + g;
-      S[2][o] = S[2][o - W1] + b;
-    }
-  }
-  return { S, w, h };
-}
-
-// The picture with a share trimmed off each side, shrunk to LW x LH; optionally turned upside down.
-function shrink(I, l = 0, t = 0, r = 0, b = 0, flip = false) {
-  const out = new Float32Array(LW * LH * 3);
-  const x0 = l * I.w;
-  const y0 = t * I.h;
-  const sx = (I.w * (1 - l - r)) / LW;
-  const sy = (I.h * (1 - t - b)) / LH;
-  const W1 = I.w + 1;
-  for (let y = 0; y < LH; y++) {
-    const ya = Math.round(y0 + y * sy);
-    const yb = Math.max(ya + 1, Math.round(y0 + (y + 1) * sy));
-    for (let x = 0; x < LW; x++) {
-      const xa = Math.round(x0 + x * sx);
-      const xb = Math.max(xa + 1, Math.round(x0 + (x + 1) * sx));
-      const area = (xb - xa) * (yb - ya);
-      const o = (flip ? (LH - 1 - y) * LW + (LW - 1 - x) : y * LW + x) * 3;
-      for (let c = 0; c < 3; c++) {
-        out[o + c] = (I.S[c][yb * W1 + xb] - I.S[c][ya * W1 + xb] - I.S[c][yb * W1 + xa] + I.S[c][ya * W1 + xa]) / area;
-      }
-    }
-  }
-  return out;
-}
-
-// What gets compared: each colour with its average removed (so overall brightness and tint don't
-// matter), plus the brightness of each pixel against its neighbourhood (which survives glare and
-// washed-out exposure). The two halves weigh the same; the whole is a unit vector.
-const GRAY = new Float64Array(LW * LH); // scratch space for lowFeature (it never runs twice at once)
-const SUM = new Float64Array((LW + 1) * (LH + 1));
-const SUMSQ = new Float64Array((LW + 1) * (LH + 1));
-function lowFeature(small) {
-  const out = new Float32Array(LOW);
-  let k = 0;
-  for (let c = 0; c < 3; c++) {
-    let sum = 0;
-    const start = k;
-    for (let y = LM; y < LH - LM; y++) {
-      for (let x = LM; x < LW - LM; x++) {
-        const v = small[(y * LW + x) * 3 + c];
-        out[k++] = v;
-        sum += v;
-      }
-    }
-    const mean = sum / LN;
-    for (let i = start; i < k; i++) out[i] -= mean;
-  }
-  let norm = 0;
-  for (let i = 0; i < k; i++) norm += out[i] * out[i];
-  norm = Math.sqrt(norm * 2) || 1;
-  for (let i = 0; i < k; i++) out[i] /= norm;
-
-  // Neighbourhood mean and spread from running sums (this runs hundreds of times per lookup, for
-  // the trimming search; adding up each 7x7 neighbourhood by hand was most of a lookup's time).
-  const gray = GRAY;
-  const S = SUM;
-  const SS = SUMSQ;
-  const W1 = LW + 1;
-  for (let y = 0; y < LH; y++) {
-    let row = 0;
-    let rowSq = 0;
-    for (let x = 0; x < LW; x++) {
-      const i = y * LW + x;
-      const g = small[i * 3] * 0.3 + small[i * 3 + 1] * 0.59 + small[i * 3 + 2] * 0.11;
-      gray[i] = g;
-      row += g;
-      rowSq += g * g;
-      const o = (y + 1) * W1 + x + 1;
-      S[o] = S[o - W1] + row;
-      SS[o] = SS[o - W1] + rowSq;
-    }
-  }
-  const R = 3;
-  norm = 0;
-  for (let y = LM; y < LH - LM; y++) {
-    const ya = Math.max(0, y - R);
-    const yb = Math.min(LH - 1, y + R) + 1;
-    for (let x = LM; x < LW - LM; x++) {
-      const xa = Math.max(0, x - R);
-      const xb = Math.min(LW - 1, x + R) + 1;
-      const n = (xb - xa) * (yb - ya);
-      const s = S[yb * W1 + xb] - S[ya * W1 + xb] - S[yb * W1 + xa] + S[ya * W1 + xa];
-      const ss = SS[yb * W1 + xb] - SS[ya * W1 + xb] - SS[yb * W1 + xa] + SS[ya * W1 + xa];
-      const mean = s / n;
-      const v = (gray[y * LW + x] - mean) / (Math.sqrt(Math.max(0, ss / n - mean * mean)) + 8);
-      out[k++] = v;
-      norm += v * v;
-    }
-  }
-  norm = Math.sqrt(norm * 2) || 1;
-  for (let i = 3 * LN; i < k; i++) out[i] /= norm;
-  return out;
 }
 
 // ---------- corner finding ----------
@@ -465,12 +261,13 @@ export async function findCard(rgb, sw, sh, hint, size = 0) {
   const at = [hint.x * sw, hint.y * sh];
   const found = FIND_MODE === 'pose' ? null : await finderCards(rgb, sw, sh);
   if (found) {
-    const cards = found.filter((c) => c.score >= 0.5).map((c) => ({ ...CF.quadPose(c.quad), score: c.score }))
+    const cards = found.filter((c) => c.score >= 0.3).map((c) => ({ ...CF.quadPose(c.quad), score: c.score }))
       .filter((p) => p.shape > 0.6);
-    // The card the point is on; failing that, one whose middle is close by.
+    // The card the point is on (a clean outline there counts even when the finder is lukewarm
+    // about it: a card in a fan of others); failing that, a clear card whose middle is close by.
     const dist = (p) => Math.hypot(p.cx - at[0], p.cy - at[1]);
-    let card = cards.filter((p) => CF.insideQuad(at, p.quad)).sort((p, q) => q.score - p.score)[0]
-      || cards.filter((p) => dist(p) < p.b * 0.75).sort((p, q) => dist(p) - dist(q))[0];
+    let card = cards.filter((p) => CF.insideQuad(at, p.quad) && (p.score >= 0.5 || p.shape > 0.85)).sort((p, q) => q.score - p.score)[0]
+      || cards.filter((p) => p.score >= 0.5 && dist(p) < p.b * 0.75).sort((p, q) => dist(p) - dist(q))[0];
     if (card) {
       let runs = 1;
       if (FIND_MODE === 'finder+pose') {
@@ -635,9 +432,6 @@ export function labelCapture(id, label) {
 }
 
 // ---------- matching ----------
-const TRIMS = [0, 0.08, 0.16]; // shares trimmed off a side, coarse pass
-const FINE = [-0.04, 0, 0.04]; // then around the best
-const LIKELY = 24; // reference pictures that get the trimming search
 const BACKGROUND = 1500; // other reference pictures used to judge what an ordinary score is
 // Sure enough to say "Match": this far above the other pictures, and this far ahead of the next card.
 // (On real lookups: right answers were 5.6-11.3 with the next card 2.5+ behind in all but 2 of 17;
@@ -645,42 +439,10 @@ const BACKGROUND = 1500; // other reference pictures used to judge what an ordin
 const SURE_SCORE = 5.5;
 const SURE_MARGIN = 2;
 
-const stats = (v) => {
-  let sum = 0;
-  for (const x of v) sum += x;
-  const mean = sum / v.length;
-  let sq = 0;
-  for (const x of v) sq += (x - mean) ** 2;
-  return { mean, sd: Math.sqrt(sq / v.length) || 1 };
-};
-
-// The corners of the card after trimming shares off the sides of the outline u ([TL,TR,BR,BL]).
-function trimQuad(u, l, t, r, b) {
-  const pt = (x, y) => {
-    const top = [u[0][0] + (u[1][0] - u[0][0]) * x, u[0][1] + (u[1][1] - u[0][1]) * x];
-    const bot = [u[3][0] + (u[2][0] - u[3][0]) * x, u[3][1] + (u[2][1] - u[3][1]) * x];
-    return [top[0] + (bot[0] - top[0]) * y, top[1] + (bot[1] - top[1]) * y];
-  };
-  return [pt(l, t), pt(1 - r, t), pt(1 - r, 1 - b), pt(l, 1 - b)];
-}
-
 // Compare the card inside `quad` with the candidates' reference pictures.
 // Returns [{ card, owner, score, emb, low }] best first, one per card name; score is how far the
 // card stands out from the other reference pictures (embedder + low-res, in standard deviations).
 async function matchCard(rgb, sw, sh, quad, candidates) {
-  // The outline's long sides are the card's; it may still be upside down, so both ways are compared.
-  const u = CF.uprightCorners(quad);
-  const upright = warp(rgb, sw, sh, u);
-  const turned = Buffer.alloc(upright.length);
-  for (let i = 0, j = W * H - 1; i < W * H; i++, j--) {
-    turned[j * 3] = upright[i * 3];
-    turned[j * 3 + 1] = upright[i * 3 + 1];
-    turned[j * 3 + 2] = upright[i * 3 + 2];
-  }
-  const vectors = await serial(() => embedRgb([upright, turned]));
-  const I = integral(upright, W, H);
-  const plain = [lowFeature(shrink(I)), lowFeature(shrink(I, 0, 0, 0, 0, true))];
-
   // Reference pictures to compare with: the candidates', plus others to judge the scores against.
   const pool = []; // { ref, name?, card?, owner?, art? }
   const seen = new Set();
@@ -699,61 +461,8 @@ async function matchCard(rgb, sw, sh, quad, candidates) {
   let n = 0;
   for (const ref of refs.values()) if (n++ % step === 0 && !used.has(ref)) pool.push({ ref });
 
-  const emb = new Float32Array(pool.length);
-  const low = new Float32Array(pool.length);
-  pool.forEach((p, i) => {
-    let e = -1;
-    for (const v of vectors) for (const r of p.ref.emb) e = Math.max(e, dot(v, r));
-    emb[i] = e;
-    low[i] = Math.max(dot(plain[0], p.ref.low), dot(plain[1], p.ref.low));
-  });
-  const lowStats = stats(low); // before trimming: trimming only lifts the likely ones
-  let embStats = stats(emb);
-
-  // Trimming search for the likeliest candidates: coarse over all four sides, then fine around the best.
-  const likely = [...Array(mine).keys()]
-    .sort((a, b) => ((emb[b] - embStats.mean) / embStats.sd + (low[b] - lowStats.mean) / lowStats.sd) - ((emb[a] - embStats.mean) / embStats.sd + (low[a] - lowStats.mean) / lowStats.sd))
-    .slice(0, LIKELY);
-  const features = new Map();
-  const featureAt = (flip, l, t, r, b) => {
-    const key = `${flip}|${l.toFixed(2)}|${t.toFixed(2)}|${r.toFixed(2)}|${b.toFixed(2)}`;
-    let f = features.get(key);
-    if (!f) features.set(key, f = lowFeature(shrink(I, l, t, r, b, !!flip)));
-    return f;
-  };
-  let fit = null; // the best trim over all likely candidates
-  const fitOf = new Map(); // pool index -> its best { s, flip, l, t, r, b }
-  for (const flip of [0, 1]) {
-    for (const l of TRIMS) for (const t of TRIMS) for (const r of TRIMS) for (const b of TRIMS) {
-      const f = featureAt(flip, l, t, r, b);
-      for (const i of likely) {
-        const s = dot(f, pool[i].ref.low);
-        if (!(fitOf.get(i)?.s >= s)) fitOf.set(i, { s, flip, l, t, r, b });
-      }
-    }
-  }
-  for (const i of [...fitOf.keys()].sort((a, b) => fitOf.get(b).s - fitOf.get(a).s).slice(0, 6)) {
-    const c = fitOf.get(i);
-    let best = c;
-    for (const dl of FINE) for (const dt of FINE) for (const dr of FINE) for (const db of FINE) {
-      const [l, t, r, b] = [c.l + dl, c.t + dt, c.r + dr, c.b + db];
-      if (l < 0 || t < 0 || r < 0 || b < 0 || (!dl && !dt && !dr && !db)) continue;
-      const s = dot(featureAt(c.flip, l, t, r, b), pool[i].ref.low);
-      if (s > best.s) best = { s, flip: c.flip, l, t, r, b };
-    }
-    fitOf.set(i, best);
-  }
-  for (const [i, c] of fitOf) {
-    if (c.s > low[i]) low[i] = c.s;
-    if (!fit || c.s > fit.s) fit = c;
-  }
-  // The embedder gets a second go at the best-fitting trim.
-  if (fit && (fit.l || fit.t || fit.r || fit.b)) {
-    const again = warp(rgb, sw, sh, trimQuad(fit.flip ? [u[2], u[3], u[0], u[1]] : u, fit.l, fit.t, fit.r, fit.b));
-    const [v] = await serial(() => embedRgb([again]));
-    pool.forEach((p, i) => { for (const r of p.ref.emb) emb[i] = Math.max(emb[i], dot(v, r)); });
-    embStats = stats(emb);
-  }
+  // The comparison itself is shared with the browser (public/cardmatch.js).
+  const { emb, low, embStats, lowStats } = await CM.rank(rgb, sw, sh, quad, pool, mine, (pictures) => serial(() => embedRgb(pictures)));
 
   const best = new Map(); // name -> its best reference
   for (let i = 0; i < mine; i++) {
@@ -818,10 +527,98 @@ export async function identify(image, hint, candidates, opts = {}) {
     runs: spot.runs,
     ms: Date.now() - t0,
   };
+  recent = { n: recent.n + 1, ms: recent.n ? recent.ms * 0.8 + result.ms * 0.2 : result.ms };
   return log(result, {
     sureOutline: spot.sure,
     matches: matches.slice(0, 6).map((m) => ({ name: m.card.name, score: m.score, emb: m.emb, low: m.low, art: m.card.imageLarge })),
   });
+}
+
+// ---------- for browsers that do the matching themselves ----------
+// A browser that is faster than this server at lookups (the join page measures both) does them
+// itself with the same code (public/cardmatch.js, public/match-worker.js). For that it needs the
+// reference data of the cards in the decks at its table: this pack.
+//   'MTGR' | json length (u32) | json | per reference: vectors as int8, a scale (f32), low-res feature as int8
+// Vectors and features are cut from 32-bit floats to 8 bits (20 KB -> 5 KB a reference; a deck's
+// pack is a few MB); fewer "other" references are sent than the server uses to judge scores.
+const PACK_OTHERS = 400;
+const packs = new Map(); // hash -> { hash, buffer, cards }
+
+export function refPack(candidates) {
+  const cards = []; // { name, owner, card }
+  const rows = []; // per candidate reference: [index into cards, small picture, normal picture]
+  const pool = [];
+  const keys = [];
+  const seen = new Set();
+  for (const { card, owner } of candidates) {
+    if (seen.has(card.name)) continue;
+    seen.add(card.name);
+    let at = -1;
+    for (const art of arts[card.name]?.list || []) {
+      const ref = refs.get(art.key);
+      if (!ref) continue;
+      if (at < 0) {
+        at = cards.push({
+          name: card.name, owner,
+          card: { type: 'card', name: card.name, scryfallId: card.scryfallId, typeLine: card.typeLine, image: card.image, imageLarge: card.imageLarge, power: card.power ?? '', toughness: card.toughness ?? '' },
+        }) - 1;
+      }
+      pool.push(ref);
+      rows.push([at, art.small || '', art.normal || '']);
+      keys.push(art.key);
+    }
+  }
+  const mine = pool.length;
+  if (!mine) return null;
+  const hash = crypto.createHash('sha1').update(`1|${keys.join(',')}|${cards.map((c) => c.owner).join(',')}`).digest('hex').slice(0, 16);
+  const had = packs.get(hash);
+  if (had) return had;
+  const used = new Set(pool);
+  const step = Math.max(1, Math.floor(refs.size / PACK_OTHERS));
+  let n = 0;
+  for (const ref of refs.values()) if (n++ % step === 0 && !used.has(ref)) pool.push(ref);
+
+  const json = Buffer.from(JSON.stringify({ v: 1, mine, total: pool.length, renditions: RENDITIONS.length, dim: DIM, low: LOW, cards, rows }));
+  const head = Buffer.alloc(8);
+  head.write('MTGR', 0, 'ascii');
+  head.writeUInt32LE(json.length, 4);
+  const per = RENDITIONS.length * DIM + 4 + LOW;
+  const body = Buffer.alloc(pool.length * per);
+  pool.forEach((ref, i) => {
+    let off = i * per;
+    for (const v of ref.emb) for (let k = 0; k < DIM; k++) body.writeInt8(Math.max(-127, Math.min(127, Math.round(v[k] * 127))), off++);
+    let max = 1e-9;
+    for (let k = 0; k < LOW; k++) max = Math.max(max, Math.abs(ref.low[k]));
+    body.writeFloatLE(max, off);
+    off += 4;
+    for (let k = 0; k < LOW; k++) body.writeInt8(Math.round((ref.low[k] / max) * 127), off++);
+  });
+  const pack = { hash, buffer: Buffer.concat([head, json, body]), cards: cards.length };
+  packs.set(hash, pack);
+  if (packs.size > 6) packs.delete(packs.keys().next().value);
+  return pack;
+}
+
+// About how long one lookup takes here, in ms: the average of recent real ones, or before there
+// are any, the models timed on blank pictures (they are about 60% of a lookup).
+let recent = { n: 0, ms: 0 };
+let dryRun = null;
+export async function lookupMs() {
+  if (recent.n >= 3) return Math.round(recent.ms);
+  dryRun ??= (async () => {
+    const { finder, embed } = await getSessions();
+    const blank = (n) => new Float32Array(n).fill(0.4);
+    const go = async () => {
+      if (finder) await finder.run({ [finder.inputNames[0]]: new ort.Tensor('float32', blank(3 * FH * FW), [1, 3, FH, FW]) });
+      await embed.run({ input: new ort.Tensor('float32', blank(2 * 3 * H * W), [2, 3, H, W]) });
+      await embed.run({ input: new ort.Tensor('float32', blank(3 * H * W), [1, 3, H, W]) });
+    };
+    await serial(go);
+    const t = performance.now();
+    await serial(go);
+    return Math.round((performance.now() - t) / 0.6);
+  })().catch(() => null);
+  return dryRun;
 }
 
 export function cacheSize() {
