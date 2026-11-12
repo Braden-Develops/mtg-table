@@ -724,7 +724,7 @@ body.hide-marks .mark-layer { display: none; }
 /* The app's guess at a card: a question until someone answers it. */
 .sticker.unsure { border-style: dashed; border-color: rgba(255, 200, 90, .8); }
 .st-ask { display: flex; align-items: center; gap: 4px; font-size: 11px; color: rgba(255, 215, 130, .95); }
-.st-ask button { min-height: 0; padding: 0 6px; line-height: 16px; border-radius: 6px; font-size: 11px; }
+.st-ask button { min-height: 0; padding: 0 6px; line-height: 16px; border-radius: 6px; font-size: 11px; white-space: nowrap; }
 .track-toast {
   position: fixed;
   left: 50%;

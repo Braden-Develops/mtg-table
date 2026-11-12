@@ -132,6 +132,17 @@ uses it; on a server without the file the app falls back to pointing the corner 
   rest in a box (or is last seen at one) loses its sticker, the log says where it went, and it is
   added to that pile's list. Hover a box for the list; click it to open the pile in the side panel
   (hover a card to see it, click to put it back on the table). Boxes are kept across games.
+- **Answering a suggestion.** A tag marked "Is it this?" has three answers: ✓ keeps it; "Other…"
+  shows the other cards the lookup considered, or a search by name, and puts the one you pick in
+  its place; ✕ removes it and tells the reader not to suggest anything for that thing again (it
+  is remembered by its colours for the rest of the browser session, so it stays left alone after
+  being moved).
+- **Picked-up cards keep their tag.** When a tagged card can't be seen and nothing is covering
+  it, its tag waits where it was, faded, and goes back on the card (with its counters) when the
+  card is seen again: by its picture, or by name when the reader looks up a card put down on the
+  table or held up to the camera. Tags are no longer removed by themselves, except when the card
+  was last seen at one of your piles. Eye menu → "Tags stay when cards are picked up" switches
+  the old behaviour (removed after a few seconds) back on.
 - **Stickers after a shuffle:** when several stickers lose their cards at once, each card goes to
   the sticker it fits best, by the card's colours as well as its outline.
 

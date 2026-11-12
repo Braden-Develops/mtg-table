@@ -60,6 +60,7 @@ window.AutoRead = (() => {
 
   function init(opts) {
     ({ code, me, act } = opts);
+    loadIgnored();
     if (enabled) start();
   }
 
@@ -438,7 +439,13 @@ window.AutoRead = (() => {
         window.Identify.feedback(lookup, best.card.name, 'confirm');
         if (hold) { hold.unsure = false; toast(`Put ${best.card.name} on the table and it gets a sticker.`, [['✕', () => done()]], LAND_WAIT_MS, best.card); }
       }],
-      ['Pick it myself', () => { window.Identify.feedback(lookup, null, 'reject'); done(); window.Marks.showCard(best.card); }],
+      ['Another card…', () => {
+        // The other cards it considered, to pick from (or search by name).
+        window.Identify.feedback(lookup, null, 'reject');
+        const at = hold?.held;
+        done();
+        window.Identify.choose(me, at?.cx ?? 0.5, at?.cy ?? 0.5, result);
+      }],
       ['✕', () => done()],
     ], LAND_WAIT_MS, best.card);
   }
@@ -474,12 +481,17 @@ window.AutoRead = (() => {
     const zones = window.Tracker.zones?.() || {};
     const inZone = (c, zone) => { const b = zones[zone]; return b && c.cx >= b[0] && c.cx <= b[2] && c.cy >= b[1] && c.cy <= b[3]; };
     const table = cards.filter(onTable);
+    boardCards = table;
     // Forget spots whose card has gone, so a card put there later is looked at.
     known = known.filter((k) => table.some((c) => far(k, c) < c.a * 0.3));
     // With a play area marked, only cards in it (or in the graveyard or exile) are looked at: not
     // the deck box, a pile of spare cards, or whatever the finder makes of the picture's edge.
     const inPlay = (c) => !zones.play || inZone(c, 'play') || inZone(c, 'graveyard') || inZone(c, 'exile');
-    const untagged = table.filter((c) => inPlay(c) && !spots.some((s) => far({ cx: s.x, cy: s.y }, c) < c.b * 0.6)
+    // Things the player said not to tag (✕ on a suggestion) are known by their colours, so they
+    // stay left alone after being moved.
+    const looks = ignored.length ? signatures(video, table) : null;
+    const leftAlone = (c) => !!looks && ignored.some((sig) => alike(sig, looks.get(c)) >= SAME_LOOK);
+    const untagged = table.filter((c) => inPlay(c) && !leftAlone(c) && !spots.some((s) => far({ cx: s.x, cy: s.y }, c) < c.b * 0.6)
       && !known.some((k) => far(k, c) < c.a * 0.3) && !inZone(c, 'library') && !inZone(c, 'command'));
     const settled = untagged.filter((c) => boardSeen.some((o) => far(o, c) < c.a * 0.08));
     boardSeen = untagged;
@@ -528,7 +540,16 @@ window.AutoRead = (() => {
     // moved about), so there is nothing to ask.
     const back = !!window.Tracker.wasHere?.(top.card.name, RECENT_MS);
     const sure = back || (r.confident && top.score >= AUTO_SCORE && lead >= AUTO_LEAD);
+    // A tag of this card is waiting for it (the card was picked up and has been put down here):
+    // that tag, with whatever counters it carries, moves to the card.
+    const waiting = window.Tracker.liftedNamed?.(top.card.name);
+    if (waiting) {
+      act({ type: 'stickerMove', id: waiting.id, x: c.cx, y: c.cy });
+      lastBoard.tagged = 'its waiting tag moved here';
+      return;
+    }
     const id = Math.random().toString(36).slice(2, 10);
+    remember(id, r);
     act({ type: 'stickerAdd', id, target: me, x: c.cx, y: c.cy, items: [{ ...top.card, type: 'card' }], unsure: !sure });
     if (sure && !back) window.Identify.feedback(r.id, top.card.name, 'auto');
     lastBoard.tagged = back ? 'back again' : sure ? 'sure' : 'asked';
@@ -552,6 +573,108 @@ window.AutoRead = (() => {
   }
   let lastCheck = null;
   const RECENT_MS = 90000; // a tag gone from my table this recently comes back without a question
+
+  // ---------- what the reader remembers about its suggestions ----------
+  // The answer behind each tag it made, so "Other…" on a suggestion can show the other cards it
+  // considered: sticker id -> the lookup's result.
+  const answers = new Map();
+  function remember(id, result) {
+    answers.set(id, result);
+    if (answers.size > 60) answers.delete(answers.keys().next().value);
+  }
+  const alternatives = (id) => answers.get(id) || null;
+
+  // "Don't suggest anything for this again" (✕ on a suggestion): the thing is remembered by its
+  // colours, a small grid over its face, so it is still recognised after it has been moved. Kept
+  // for this browser session (the colours depend on tonight's light and camera settings).
+  const SAME_LOOK = 0.6; // how alike two colour grids must be to be the same thing
+  const IGNORED_MAX = 40;
+  let ignored = [];
+  let boardCards = []; // the table cards the last look saw
+  let sigCanvas = null;
+  const ignoredKey = () => `noScan:${code}`;
+  function loadIgnored() {
+    try { ignored = (JSON.parse(sessionStorage.getItem(ignoredKey())) || []).map((a) => Float32Array.from(a)); } catch { ignored = []; }
+  }
+  function saveIgnored() {
+    try { sessionStorage.setItem(ignoredKey(), JSON.stringify(ignored.map((sig) => Array.from(sig, (v) => Math.round(v * 1000) / 1000)))); } catch { /* ignore */ }
+  }
+  // Colour grids of cards the finder outlined: Map(card -> Float32Array). Each grid is 4x6 points
+  // over the card's face in the card's own frame, as colour without brightness.
+  function signatures(video, cards) {
+    const SW = 640;
+    const SH = Math.round((SW * video.videoHeight) / video.videoWidth);
+    if (!sigCanvas) sigCanvas = document.createElement('canvas');
+    if (sigCanvas.width !== SW || sigCanvas.height !== SH) { sigCanvas.width = SW; sigCanvas.height = SH; }
+    const ctx = sigCanvas.getContext('2d', { willReadFrequently: true });
+    ctx.drawImage(video, 0, 0, SW, SH);
+    const rgb = ctx.getImageData(0, 0, SW, SH).data;
+    const out = new Map();
+    for (const c of cards) {
+      const sig = new Float32Array(4 * 6 * 3);
+      const cos = Math.cos(c.th);
+      const sin = Math.sin(c.th);
+      const a = c.a * SH;
+      const b = c.b * SH;
+      let k = 0;
+      for (let j = 0; j < 6; j++) {
+        for (let i = 0; i < 4; i++) {
+          const u = (-0.3 + 0.2 * i) * a;
+          const v = (-0.35 + 0.14 * j) * b;
+          const x = Math.min(SW - 2, Math.max(1, Math.round(c.cx * SW + u * cos - v * sin)));
+          const y = Math.min(SH - 2, Math.max(1, Math.round(c.cy * SH + u * sin + v * cos)));
+          let r = 0;
+          let g = 0;
+          let bl = 0;
+          for (let dy = -1; dy <= 1; dy++) {
+            for (let dx = -1; dx <= 1; dx++) {
+              const q = ((y + dy) * SW + x + dx) * 4;
+              r += rgb[q];
+              g += rgb[q + 1];
+              bl += rgb[q + 2];
+            }
+          }
+          const sum = r + g + bl + 270; // (very dark patches have no reliable colour)
+          sig[k++] = r / sum;
+          sig[k++] = g / sum;
+          sig[k++] = bl / sum;
+        }
+      }
+      out.set(c, sig);
+    }
+    return out;
+  }
+  // 1 = the same colours, 0 = clearly different; either way up (an outline doesn't say which end is the top).
+  function alike(A, B) {
+    if (!A || !B) return 0;
+    let straight = 0;
+    let turned = 0;
+    const n = A.length / 3;
+    for (let p = 0; p < n; p++) {
+      const q = n - 1 - p;
+      for (let ch = 0; ch < 3; ch++) {
+        straight += Math.abs(A[p * 3 + ch] - B[p * 3 + ch]);
+        turned += Math.abs(A[p * 3 + ch] - B[q * 3 + ch]);
+      }
+    }
+    return Math.max(0, 1 - Math.min(straight, turned) / A.length / 0.05);
+  }
+  // ✕ on a suggestion of mine at (x, y): never suggest anything for that thing again.
+  function rejected(id, x, y) {
+    answers.delete(id);
+    known.push({ cx: x, cy: y });
+    const video = localVideo();
+    if (!video?.videoWidth) return;
+    const aspect = video.videoWidth / video.videoHeight;
+    const near = boardCards.map((c) => ({ c, d: Math.hypot((c.cx - x) * aspect, c.cy - y) }))
+      .filter((o) => o.d < o.c.b * 0.6).sort((p, q) => p.d - q.d)[0];
+    if (!near) return;
+    const sig = signatures(video, [near.c]).get(near.c);
+    ignored = ignored.filter((old) => alike(old, sig) < SAME_LOOK);
+    ignored.push(sig);
+    if (ignored.length > IGNORED_MAX) ignored.shift();
+    saveIgnored();
+  }
 
   function setTagging(on) {
     tagging = !!on;
@@ -607,9 +730,16 @@ window.AutoRead = (() => {
       }
     }
     window.Identify.feedback(hold.lookup, card.name, 'place');
-    const id = Math.random().toString(36).slice(2, 10);
-    act({ type: 'stickerAdd', id, target: me, x: spot.cx, y: spot.cy, items: [{ ...card, type: 'card' }] });
-    toast(`Put ${card.name} on the table.`, [['Undo', () => { act({ type: 'stickerRemove', id }); hideToast(); }]], 8000);
+    // Picked up from the table, shown to the camera and put down again: its own tag goes with it.
+    const waiting = window.Tracker.liftedNamed?.(card.name);
+    if (waiting) {
+      act({ type: 'stickerMove', id: waiting.id, x: spot.cx, y: spot.cy });
+      toast(`${card.name} is back on the table.`, [], 4000);
+    } else {
+      const id = Math.random().toString(36).slice(2, 10);
+      act({ type: 'stickerAdd', id, target: me, x: spot.cx, y: spot.cy, items: [{ ...card, type: 'card' }] });
+      toast(`Put ${card.name} on the table.`, [['Undo', () => { act({ type: 'stickerRemove', id }); hideToast(); }]], 8000);
+    }
     lastLand = { finder: true, ms: Math.round(performance.now() - hold.since), fresh: fresh.length, settled: settled.length };
     phase = 'idle';
     hold = null;
@@ -762,7 +892,7 @@ window.AutoRead = (() => {
 
   let last = null;
   let lastLand = null;
-  const debug = () => ({ enabled, phase, card: hold?.card?.name, failedChecks, hasBg: !!bg, last, lastLand, lastSpots, timing, tagging, lastBoard, lastCheck, inFlight, known: known.length });
+  const debug = () => ({ enabled, phase, card: hold?.card?.name, failedChecks, hasBg: !!bg, last, lastLand, lastSpots, timing, tagging, lastBoard, lastCheck, inFlight, known: known.length, ignored: ignored.length });
 
-  return { init, setEnabled, isEnabled: () => enabled, setTagging, isTagging: () => tagging, debug, patches, cardSpots };
+  return { init, setEnabled, isEnabled: () => enabled, setTagging, isTagging: () => tagging, alternatives, rejected, debug, patches, cardSpots };
 })();

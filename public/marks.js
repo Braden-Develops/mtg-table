@@ -114,6 +114,17 @@ window.Marks = (() => {
       window.AutoRead?.setTagging(!window.AutoRead.isTagging());
       showAutoTag();
     });
+    // Tags of cards that can't be seen: kept (the default) or removed after a few seconds.
+    const showRemoveLost = () => {
+      const on = !!window.Tracker?.removesLost();
+      $('remove-lost-btn').classList.toggle('on', !on);
+      $('remove-lost-btn').textContent = on ? 'Tags go when cards leave' : 'Tags stay when cards are picked up';
+    };
+    showRemoveLost();
+    $('remove-lost-btn').addEventListener('click', () => {
+      window.Tracker.setRemovesLost(!window.Tracker.removesLost());
+      showRemoveLost();
+    });
     // Card debug: what recognition sees, drawn over my own camera.
     const showDebug = () => {
       const on = !!window.Tracker?.isDebug();
@@ -590,7 +601,11 @@ window.Marks = (() => {
   function stickerHtml(s) {
     const total = totalPT(s.items);
     const parts = [];
-    if (s.unsure) parts.push('<div class="st-ask">Is it this? <button data-ask="yes" title="Yes: keep this tag">✓</button><button data-ask="no" title="No: remove it">✕</button></div>');
+    if (s.unsure) {
+      parts.push('<div class="st-ask">Is it this? <button data-ask="yes" title="Yes: keep this tag">✓</button>'
+        + '<button data-ask="other" title="It is a different card: pick which">Other…</button>'
+        + '<button data-ask="no" title="Not a card to tag: remove this, and don\'t suggest anything for it again">✕</button></div>');
+    }
     if (total) parts.push(`<div class="st-pt">${esc(total)}</div>`);
     for (const it of s.items) {
       if (it.type === 'card') {
@@ -680,7 +695,11 @@ window.Marks = (() => {
     const flags = l && Date.now() - l.at < LIVE_TTL ? l.flags : 0;
     if (mine === 'looking') return 'Looking for the card…';
     if (mine === 'no-card') return 'No card found under it, so it stays put.';
-    if (flags & 2 || mine === 'lost') return 'Card not in view: the sticker goes away soon unless it comes back.';
+    if (flags & 2 || mine === 'lost') {
+      return s.tile === me && !window.Tracker.removesLost?.()
+        ? 'Card not in view (picked up?): the tag waits here and goes back on the card when it is seen again.'
+        : 'Card not in view: the sticker goes away soon unless it comes back.';
+    }
     if (flags & 1) return 'Following the card.';
     if (s.tile === me && !window.Tracker.isEnabled()) return 'Card tracking is off on your computer (menu: Stickers follow cards).';
     return '';
@@ -741,7 +760,20 @@ window.Marks = (() => {
       hidePreview();
       if (answer && !moved) {
         // Answering the app's guess.
-        act(answer === 'yes' ? { type: 'stickerConfirm', id: el.dataset.id } : { type: 'stickerRemove', id: el.dataset.id });
+        const id = el.dataset.id;
+        const s = state?.stickers?.[id];
+        if (answer === 'yes') act({ type: 'stickerConfirm', id });
+        else if (answer === 'other') {
+          // The other cards it considered, if this is my camera (my browser did the lookup);
+          // otherwise the sticker's own editor, where the card can be changed by hand.
+          const seen = s?.tile === me ? window.AutoRead?.alternatives?.(id) : null;
+          if (seen && s) window.Identify.choose(s.tile, s.x, s.y, seen, id);
+          else openEditor({ mode: 'edit', id });
+        } else {
+          // Not something to tag: on my own camera the reader remembers what it looks like.
+          if (s?.tile === me) window.AutoRead?.rejected?.(id, s.x, s.y);
+          act({ type: 'stickerRemove', id });
+        }
         return;
       }
       if (moved) {
