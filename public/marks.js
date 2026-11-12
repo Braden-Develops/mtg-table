@@ -776,7 +776,10 @@ window.Marks = (() => {
           else openEditor({ mode: 'edit', id });
         } else {
           // Not something to tag: on my own camera the reader remembers what it looks like.
-          if (s?.tile === me) window.AutoRead?.rejected?.(id, s.x, s.y);
+          if (s?.tile === me) {
+            window.AutoRead?.rejected?.(id, s.x, s.y);
+            window.AutoRead?.unlearnAt?.(s.x, s.y);
+          }
           act({ type: 'stickerRemove', id });
         }
         return;
@@ -1004,6 +1007,10 @@ window.Marks = (() => {
     $('sticker-delete').addEventListener('click', () => {
       const s = currentSticker();
       if (s) {
+        // A card tag of mine deleted by hand: if the reader put it there by sight, it was wrong
+        // about what that card looks like, and forgets it.
+        const card = s.tile === me && s.items.find((it) => it.type === 'card');
+        if (card) window.AutoRead?.removedAt?.(s.x, s.y, card.name);
         act({ type: 'stickerRemove', id: s.id });
         closeEditor();
       }

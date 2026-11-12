@@ -842,6 +842,28 @@ window.AutoRead = (() => {
       }
     } catch { /* nothing kept */ }
   }
+  // The player says the tag on the card at (x, y) is wrong: forget any fingerprint that says that
+  // card is `name` (or, with no name, that it is anything).
+  async function unlearnAt(x, y, name = null) {
+    const video = localVideo();
+    if (!video?.videoWidth || !gallery.size || !window.Tracker.hasFinder?.()) return;
+    const cards = await window.Tracker.findCards(video, 0.5, 0.5, 1);
+    const aspect = video.videoWidth / video.videoHeight;
+    const at = (cards || []).filter((c) => c.sure && c.shape > 0.75)
+      .map((c) => ({ c, d: Math.hypot((c.cx - x) * aspect, c.cy - y) })).filter((o) => o.d < o.c.b * 0.6).sort((p, q) => p.d - q.d)[0];
+    if (!at) return;
+    const print = fingerprints(video, [at.c]).get(at.c);
+    let changed = false;
+    for (const [known, g] of [...gallery]) {
+      if (name && known !== name) continue;
+      const keep = g.samples.filter((sample) => likeness(print, sample) < 0.85);
+      if (keep.length === g.samples.length) continue;
+      changed = true;
+      if (keep.length) g.samples = keep;
+      else gallery.delete(known);
+    }
+    if (changed) saveGallery();
+  }
   // The player says the card at (x, y) of my camera is this one (✓ on a suggestion, or a pick).
   async function learnAt(x, y, card) {
     const video = localVideo();
@@ -1174,7 +1196,9 @@ window.AutoRead = (() => {
   let lastLand = null;
   const debug = () => ({ enabled, phase, card: hold?.card?.name, failedChecks, hasBg: !!bg, last, lastLand, lastSpots, timing, tagging, lastBoard, lastCheck, lastSight, inFlight, known: known.length, ignored: ignored.length });
 
-  return { init, setEnabled, isEnabled: () => enabled, setTagging, isTagging: () => tagging, alternatives, rejected, learnAt, debug,
+  return { init, setEnabled, isEnabled: () => enabled, setTagging, isTagging: () => tagging, alternatives, rejected, learnAt, unlearnAt, debug,
+    // A tag of mine at (x, y) was deleted by hand: don't put one straight back, and forget that the card there looks like `name`.
+    removedAt: (x, y, name) => { known.push({ cx: x, cy: y }); return unlearnAt(x, y, name); },
     // For the card debug overlay: every known card's fingerprints as little pictures, and the last look's cards.
     sight: () => ({ known: [...gallery].map(([name, g]) => ({ name, thumbs: g.samples.map((sample) => sample[2] || null) })), seen: lastSight?.seen || [] }), patches, cardSpots };
 })();

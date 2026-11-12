@@ -21,7 +21,7 @@ import sharp from 'sharp';
 import '../public/cardfind.js';
 import '../public/cardmatch.js';
 import { DATA_DIR, ROOT } from '../scripts/lib.js';
-import { artworks } from './scryfall.js';
+import { artworks, printing } from './scryfall.js';
 
 const CF = globalThis.CardFind;
 const CM = globalThis.CardMatch;
@@ -64,6 +64,7 @@ function getSessions() {
 // Load the models before the first click needs them.
 export function warmUp() {
   if (modelsAvailable()) getSessions().catch((err) => console.warn('Recognition models failed to load:', err.message));
+  learnSymbols();
 }
 
 // One model run at a time. Running lookups side by side was tried and gains nothing: this
@@ -462,7 +463,7 @@ async function matchCard(rgb, sw, sh, quad, candidates) {
   for (const ref of refs.values()) if (n++ % step === 0 && !used.has(ref)) pool.push({ ref });
 
   // The comparison itself is shared with the browser (public/cardmatch.js).
-  const { emb, low, embStats, lowStats } = await CM.rank(rgb, sw, sh, quad, pool, mine, (pictures) => serial(() => embedRgb(pictures)));
+  const { emb, low, embStats, lowStats, boxes } = await CM.rank(rgb, sw, sh, quad, pool, mine, (pictures) => serial(() => embedRgb(pictures)));
 
   const best = new Map(); // name -> its best reference
   for (let i = 0; i < mine; i++) {
@@ -470,10 +471,13 @@ async function matchCard(rgb, sw, sh, quad, candidates) {
     const score = (emb[i] - embStats.mean) / embStats.sd + (low[i] - lowStats.mean) / lowStats.sd;
     if (!(best.get(p.name)?.score >= score)) best.set(p.name, { ...p, score, emb: emb[i], low: low[i] });
   }
-  return [...best.values()].sort((a, b) => b.score - a.score).map(({ card, owner, art, score, emb: e, low: l }) => ({
+  const matches = [...best.values()].sort((a, b) => b.score - a.score).map(({ card, owner, art, score, emb: e, low: l }) => ({
     // Show the printing that matched, so a sticker looks like the card on the table.
     card: { ...card, image: art.small || card.image, imageLarge: art.normal }, owner, score, emb: e, low: l,
   }));
+  // A basic land is told by its symbol, whatever its art.
+  const basic = CM.basicLand(boxes, symbols?.refs);
+  return CM.withBasic(matches, basic, (name) => candidates.find((c) => c.card.name === name) || null, symbols?.cards[basic?.name]);
 }
 
 const margin = (m) => (m[0] ? m[0].score - (m[1]?.score ?? -Infinity) : 0);
@@ -534,6 +538,45 @@ export async function identify(image, hint, candidates, opts = {}) {
   });
 }
 
+// ---------- basic lands, by their symbol ----------
+// See public/cardmatch.js. The symbols are taken once from scans of a few sets' basics (their text
+// boxes differ a little in shade and texture) and kept in data/basic-symbols.json.
+const SYMBOL_FILE = path.join(DATA_DIR, 'basic-symbols.json');
+const SYMBOL_SETS = ['m21', 'dmu', 'woe', 'one', 'khm'];
+const BASICS = ['Plains', 'Island', 'Swamp', 'Mountain', 'Forest'];
+let symbols = null; // { cards: { name: card }, refs: [{ name, f, c }] }
+try {
+  const saved = JSON.parse(fs.readFileSync(SYMBOL_FILE, 'utf8'));
+  if (saved.v === 1) symbols = { cards: saved.cards, refs: saved.refs.map((r) => ({ name: r.name, f: Float32Array.from(r.f), c: r.c })) };
+} catch { /* not built yet */ }
+let symbolsBuilding = null;
+export function learnSymbols() {
+  if (symbols || symbolsBuilding) return symbolsBuilding;
+  symbolsBuilding = (async () => {
+    const cards = {};
+    const refs = [];
+    for (const set of SYMBOL_SETS) {
+      for (const name of BASICS) {
+        const card = await printing(name, set);
+        if (!card || !okImage(card.imageLarge)) continue;
+        const res = await fetch(card.imageLarge, { headers: { 'User-Agent': 'MTGTable/0.1 (private game table)' } });
+        if (!res.ok) continue;
+        const rgb = await sharp(Buffer.from(await res.arrayBuffer())).removeAlpha().resize(W, H, { fit: 'fill' }).raw().toBuffer();
+        const box = CM.boxFeature(shrink(integral(rgb, W, H)));
+        refs.push({ name, f: box.f, c: box.c });
+        cards[name] ??= { type: 'card', name, scryfallId: card.scryfallId, typeLine: card.typeLine, image: card.image, imageLarge: card.imageLarge, power: '', toughness: '' };
+        await new Promise((r) => setTimeout(r, 80));
+      }
+    }
+    // All five, or try again next start (Scryfall was unreachable part-way).
+    if (BASICS.every((name) => refs.some((r) => r.name === name))) {
+      symbols = { cards, refs };
+      fs.writeFile(SYMBOL_FILE, JSON.stringify({ v: 1, cards, refs: refs.map((r) => ({ name: r.name, f: Array.from(r.f, (x) => Math.round(x * 1e4) / 1e4), c: r.c })) }), () => {});
+    }
+  })().catch((err) => console.warn('Could not learn the basic land symbols:', err.message)).finally(() => { symbolsBuilding = null; });
+  return symbolsBuilding;
+}
+
 // ---------- for browsers that do the matching themselves ----------
 // A browser that is faster than this server at lookups (the join page measures both) does them
 // itself with the same code (public/cardmatch.js, public/match-worker.js). For that it needs the
@@ -570,7 +613,7 @@ export function refPack(candidates) {
   }
   const mine = pool.length;
   if (!mine) return null;
-  const hash = crypto.createHash('sha1').update(`1|${keys.join(',')}|${cards.map((c) => c.owner).join(',')}`).digest('hex').slice(0, 16);
+  const hash = crypto.createHash('sha1').update(`2|${symbols ? 'sym' : ''}|${keys.join(',')}|${cards.map((c) => c.owner).join(',')}`).digest('hex').slice(0, 16);
   const had = packs.get(hash);
   if (had) return had;
   const used = new Set(pool);
@@ -578,7 +621,8 @@ export function refPack(candidates) {
   let n = 0;
   for (const ref of refs.values()) if (n++ % step === 0 && !used.has(ref)) pool.push(ref);
 
-  const json = Buffer.from(JSON.stringify({ v: 1, mine, total: pool.length, renditions: RENDITIONS.length, dim: DIM, low: LOW, cards, rows }));
+  const packSymbols = symbols && { cards: symbols.cards, refs: symbols.refs.map((r) => ({ name: r.name, f: Array.from(r.f, (x) => Math.round(x * 1e3) / 1e3), c: r.c })) };
+  const json = Buffer.from(JSON.stringify({ v: 1, mine, total: pool.length, renditions: RENDITIONS.length, dim: DIM, low: LOW, cards, rows, symbols: packSymbols }));
   const head = Buffer.alloc(8);
   head.write('MTGR', 0, 'ascii');
   head.writeUInt32LE(json.length, 4);

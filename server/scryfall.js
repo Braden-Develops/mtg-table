@@ -153,6 +153,12 @@ function trimCard(card) {
 // Throws when Scryfall can't be reached, so the caller knows the list isn't complete.
 const MAX_LOOKS = 40;
 const MAX_LOOKS_BASIC = 60; // basic lands have hundreds; the newest are the likeliest at a table
+// One printing of a card by set code, trimmed; null if Scryfall has none or can't be reached.
+export async function printing(name, set) {
+  const { status, body } = await scryfallGet(`/cards/named?exact=${encodeURIComponent(name)}&set=${encodeURIComponent(set)}`);
+  return status === 200 ? trimCard(body) : null;
+}
+
 export async function artworks(name) {
   const q = `!"${String(name).replace(/"/g, '')}" game:paper`;
   let next = `/cards/search?q=${encodeURIComponent(q)}&unique=prints&order=released&dir=desc&include_extras=false`;

@@ -8,7 +8,7 @@ import path from 'node:path';
 import ort from 'onnxruntime-node';
 import sharp from 'sharp';
 import { DATA_DIR, ROOT } from './lib.js';
-import { identify, indexCards, refPack } from '../server/recognize.js';
+import { identify, indexCards, learnSymbols, refPack } from '../server/recognize.js';
 
 const CM = globalThis.CardMatch;
 const read = (file) => { try { return JSON.parse(fs.readFileSync(file, 'utf8')); } catch { return null; } };
@@ -26,6 +26,7 @@ for (const folder of ['identify-fixtures', 'identify-log']) {
 }
 const names = [...new Set(cases.flatMap((c) => c.result.candidates))];
 await indexCards(names.map((name) => ({ name })));
+await learnSymbols();
 const candidates = names.map((name) => ({ card: { name }, owner: '' }));
 const packed = refPack(candidates);
 const pack = CM.unpack(packed.buffer.buffer.slice(packed.buffer.byteOffset, packed.buffer.byteOffset + packed.buffer.length));

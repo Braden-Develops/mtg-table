@@ -316,9 +316,69 @@
     }
   
   
-    return { emb, low, embStats, lowStats };
+    // (boxes: the text box either way up, for basicLand below.)
+    return { emb, low, embStats, lowStats, boxes: [boxFeature(shrink(I)), boxFeature(shrink(I, 0, 0, 0, 0, true))] };
   }
 
+
+  // ---------- basic lands, by their symbol ----------
+  // A basic land has hundreds of printings with different art, far more than there are reference
+  // pictures for, so the art is the wrong thing to match: a player's Island was suggested as
+  // "Temple of Abandon". But the text box of almost every one is the same: one big mana symbol.
+  // So basics are told by that. The feature is the text box alone (rows 28-40 of the 45, the
+  // middle 24 of 32 columns) as colour with its average removed; its average colour is kept apart,
+  // to tell a Forest's symbol from a Swamp's, which are alike in shape.
+  // Measured on webcam captures against symbols from scans: Forests 0.64-0.91, Islands 0.43-0.79,
+  // every non-land at most 0.38.
+  const BASIC_AT = 0.5; // the text box is this alike to a basic's symbol: it is that basic
+  function boxFeature(small, flip = false) {
+    const f = new Float32Array(13 * 24 * 3);
+    const mean = [0, 0, 0];
+    let k = 0;
+    for (let y = 28; y <= 40; y++) {
+      for (let x = 4; x <= 27; x++) {
+        const i = ((flip ? LH - 1 - y : y) * LW + (flip ? LW - 1 - x : x)) * 3;
+        for (let c = 0; c < 3; c++) { f[k] = small[i + c]; mean[c] += small[i + c]; k++; }
+      }
+    }
+    const n = f.length / 3;
+    let ss = 0;
+    for (let i = 0; i < f.length; i++) { f[i] -= mean[i % 3] / n; ss += f[i] * f[i]; }
+    const norm = Math.sqrt(ss) || 1;
+    for (let i = 0; i < f.length; i++) f[i] /= norm;
+    const sum = mean[0] + mean[1] + mean[2] || 1;
+    return { f, c: mean.map((m) => m / sum) };
+  }
+  // Which basic land the text boxes (from rank) show, if any: { name, score, lead }.
+  // refs: [{ name, f, c }], symbols taken from scans (server/recognize.js builds them).
+  function basicLand(boxes, refs) {
+    if (!boxes || !refs?.length) return null;
+    const best = new Map(); // name -> { score, hue }
+    for (const ref of refs) {
+      for (const box of boxes) {
+        const score = dot(box.f, ref.f);
+        const hue = Math.abs(box.c[0] - ref.c[0]) + Math.abs(box.c[1] - ref.c[1]) + Math.abs(box.c[2] - ref.c[2]);
+        if (!(best.get(ref.name)?.score >= score)) best.set(ref.name, { name: ref.name, score, hue });
+      }
+    }
+    const order = [...best.values()].sort((a, b) => b.score - a.score);
+    let [top, next] = order;
+    // Two symbols about as alike in shape: the one whose colour is closer.
+    if (next && top.score - next.score < 0.12 && next.hue < top.hue) [top, next] = [next, top];
+    if (top.score < BASIC_AT) return null;
+    return { name: top.name, score: top.score, lead: top.score - (next?.score ?? 0) };
+  }
+  // Put a detected basic land at the head of a lookup's matches. matches: [{ card, owner, score }]
+  // best first; own(name) -> { card, owner } from the decks, or null. Returns the new list.
+  function withBasic(matches, basic, own, fallback) {
+    if (!basic || matches[0]?.score >= 9) return matches; // (a match that strong isn't overruled)
+    const mine = own(basic.name) || (fallback ? { card: fallback, owner: '' } : null);
+    if (!mine) return matches;
+    const rest = matches.filter((m) => m.card.name !== basic.name);
+    // Clear of the rest, so it is taken as sure: the symbol, not the art score, is the evidence.
+    const score = Math.round(Math.max(7.5 + basic.score * 3, (rest[0]?.score ?? 0) + 3) * 10) / 10;
+    return [{ ...mine, score, basic: true }, ...rest];
+  }
 
   // ---------- a whole lookup, for the browser ----------
   // The server does these steps with its own image library and model runtime (server/recognize.js);
@@ -429,18 +489,21 @@
       || cards.filter((p) => p.score >= 0.5 && dist(p) < p.b * 0.75).sort((p, q) => dist(p) - dist(q))[0];
     if (!card) return { found: false, runs: 1, ms: Date.now() - t0, local: true };
     const { meta, pool } = pack;
-    const { emb, low, embStats, lowStats } = await rank(rgb, sw, sh, card.quad, pool, meta.mine, embed);
+    const { emb, low, embStats, lowStats, boxes } = await rank(rgb, sw, sh, card.quad, pool, meta.mine, embed);
     const best = new Map(); // card index -> its best reference
     for (let i = 0; i < meta.mine; i++) {
       const score = (emb[i] - embStats.mean) / embStats.sd + (low[i] - lowStats.mean) / lowStats.sd;
       const [ci, small, normal] = meta.rows[i];
       if (!(best.get(ci)?.score >= score)) best.set(ci, { ci, small, normal, score });
     }
-    const matches = [...best.values()].sort((a, b) => b.score - a.score).slice(0, 6).map((m) => {
+    let matches = [...best.values()].sort((a, b) => b.score - a.score).slice(0, 6).map((m) => {
       const c = meta.cards[m.ci];
       // Show the printing that matched, so a sticker looks like the card on the table.
       return { owner: c.owner, score: Math.round(m.score * 10) / 10, card: { ...c.card, image: m.small || c.card.image, imageLarge: m.normal || c.card.imageLarge } };
     });
+    // A basic land is told by its symbol, whatever its art.
+    const basic = basicLand(boxes, meta.symbols?.refs);
+    matches = withBasic(matches, basic, (name) => meta.cards.find((c) => c.name === name) || null, meta.symbols?.cards?.[basic?.name]).slice(0, 6);
     const top = matches[0];
     const lead = top ? top.score - (matches[1]?.score ?? -Infinity) : 0;
     return {
@@ -459,5 +522,5 @@
     };
   }
 
-  globalThis.CardMatch = { W, H, DIM, LW, LH, LM, LN, LOW, dot, homography, sampleInto, warp, integral, shrink, lowFeature, stats, trimQuad, rank, FW, FH, unpack, finderInput, finderCards, lookup };
+  globalThis.CardMatch = { W, H, DIM, LW, LH, LM, LN, LOW, dot, homography, sampleInto, warp, integral, shrink, lowFeature, stats, trimQuad, rank, boxFeature, basicLand, withBasic, FW, FH, unpack, finderInput, finderCards, lookup };
 })();

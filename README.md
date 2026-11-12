@@ -151,6 +151,13 @@ uses it; on a server without the file the app falls back to pointing the corner 
   Lookups are only for cards not seen before. Measured on one table: a card against itself
   0.91-1.00 (0.97-1.00 after being moved), against any other card 0.39-0.66. Fingerprints are kept
   for the browser session. Card debug lists what each card looks most like, and by how much.
+- **Basic lands are told by their symbol.** A basic has hundreds of printings, far more than
+  there are reference pictures for, so its art is the wrong thing to match. The text box of
+  almost every one is the same big mana symbol: the matcher compares that with symbols taken from
+  a few sets' scans (`data/basic-symbols.json`, built at first start) before the art. Full-art and
+  old-frame basics without the symbol box still go by art.
+- **Forgetting.** Deleting a tag by hand, or pressing ✕ on a suggestion, also forgets any
+  fingerprint that said the card under it was that card.
 - **One card tag per card.** Two on one card means something went wrong: the one that belongs
   stays, a suggestion among the rest is dropped, and a confirmed one goes looking for its own
   card.
