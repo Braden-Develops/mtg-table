@@ -74,6 +74,7 @@
         <button data-tool="pen" title="Pen: draw freehand on a video"><svg class="ic"><use href="#i-pen"/></svg><span class="lbl">Pen</span></button>
         <button data-tool="arrow" title="Arrow: drag to point from one thing to another"><svg class="ic"><use href="#i-arrow"/></svg><span class="lbl">Arrow</span></button>
         <button data-tool="eraser" title="Eraser: click or drag over drawings to remove them"><svg class="ic"><use href="#i-eraser"/></svg><span class="lbl">Eraser</span></button>
+        <button data-tool="zone" title="Zones: mark where your command zone, library, graveyard and exile are on your camera. A stickered card moved there is logged and its sticker removed."><svg class="ic"><use href="#i-layers"/></svg><span class="lbl">Zones</span></button>
       </nav>
 
       <div class="actions">
@@ -97,6 +98,7 @@
             <button id="names-btn" class="menu-item check" title="Show or hide card names and labels on stickers">Names on</button>
             <button id="track-btn" class="menu-item check" title="Stickers on your own camera follow the card under them, and go away when the card leaves the table. Runs on this computer.">Stickers follow cards</button>
             <button id="read-held-btn" class="menu-item check" title="Hold a card up close to your camera for a moment: it's recognised, and when you put it down it gets a card sticker. Runs on this computer.">Read cards I hold up</button>
+            <button id="auto-tag-btn" class="menu-item check" title="Cards lying on your table are recognised and tagged by themselves: a sure match gets its tag, a likely one is shown as a question you can confirm. Runs on this computer; each new card is looked up once.">Tag cards on my table</button>
             <button id="hide-marks-btn" class="menu-item" title="Hide stickers and drawings on your screen only">Hide marks</button>
             <button id="stats-btn" class="menu-item" title="Show or hide video quality numbers on each video">Hide stats</button>
             <div class="menu-sep"></div>
@@ -105,6 +107,17 @@
         </div>
       </div>
     </header>
+
+    <!-- Zone options: shown while the zone tool is picked -->
+    <div class="subbar zone-bar" aria-label="Zones">
+      <span class="zone-hint" title="Drag on empty table to draw the picked zone. Drag a box to move it, or its edge or corner to resize it.">Draw, move or resize:</span>
+      <button data-zone="command" class="chip">Command zone</button>
+      <button data-zone="library" class="chip">Library</button>
+      <button data-zone="graveyard" class="chip on">Graveyard</button>
+      <button data-zone="exile" class="chip">Exile</button>
+      <span class="divider"></span>
+      <button id="zone-clear" class="ghost" title="Remove the zone picked on the left">Remove</button>
+    </div>
 
     <!-- Drawing options: shown while the pen, arrow or eraser is picked -->
     <div class="subbar draw-bar" aria-label="Drawing options">
@@ -176,6 +189,16 @@
         <section class="panel-sec">
           <h3>Log</h3>
           <ul id="game-log" class="game-log"></ul>
+        </section>
+      </aside>
+
+      <aside id="zone-panel" class="game-panel" hidden>
+        <div class="panel-head">
+          <h2 id="zone-title">Graveyard</h2>
+          <button id="zone-close" class="icon-btn" title="Close"><svg class="ic"><use href="#i-x"/></svg></button>
+        </div>
+        <section class="panel-sec">
+          <div id="zone-body"></div>
         </section>
       </aside>
 

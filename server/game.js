@@ -71,6 +71,14 @@ function getGame(room) {
     p.deck ??= null;
   }
   game.stickers ??= {}; // id -> { id, tile, x, y, items: [], by }
+  // Where each player's piles are on their camera: name -> { command | library | graveyard | exile: [x0, y0, x1, y1] }
+  // (0-1 over their picture). Kept across games: the camera hasn't moved.
+  game.zones ??= {};
+  // What has gone into each pile this game: name -> { zone: [{ name, image, imageLarge }] }, newest last.
+  game.piles ??= {};
+  for (const piles of Object.values(game.piles)) {
+    for (const [zone, pile] of Object.entries(piles)) piles[zone] = pile.map((c) => (typeof c === 'string' ? { name: c, image: '', imageLarge: '' } : c));
+  }
   game.drawings ??= []; // { id, tile, by, color, kind, points, keep, t }
   return game;
 }
@@ -127,6 +135,9 @@ export function cleanItem(item) {
   }
 }
 
+const PILE_LIMIT = 150;
+// How the log words a card going to each pile.
+const ZONES = { command: 'went back to the command zone', library: 'went to the library', graveyard: 'went to the graveyard', exile: 'was exiled' };
 const itemName = (item) => (item.type === 'card' ? item.name
   : item.type === 'pt' ? (item.label || `${item.mode === 'mod' ? 'modifier' : 'P/T'} ${item.power}/${item.toughness}`)
     : item.type === 'counter' ? `${item.label} counter` : `"${item.text}"`);
@@ -309,7 +320,17 @@ export function applyAction(room, by, action) {
       // Browsers may pick the id so they can keep editing the sticker they just made.
       const id = /^[a-z0-9]{6,12}$/.test(action.id) && !game.stickers[action.id] ? action.id : newId();
       game.stickers[id] = { id, tile: target, x: unit(action.x), y: unit(action.y), items, by };
-      log(game, by, `Put ${items.map(itemName).join(' + ')} on ${target}'s table`);
+      // unsure: the app's guess at a card it saw on the table, shown as a question until confirmed.
+      if (action.unsure) game.stickers[id].unsure = true;
+      // A card put back on the table has left whichever pile it was in (the newest copy of it).
+      for (const it of items) {
+        if (it.type !== 'card') continue;
+        for (const pile of Object.values(game.piles[target] || {})) {
+          const i = pile.map((c) => c.name).lastIndexOf(it.name);
+          if (i >= 0) { pile.splice(i, 1); break; }
+        }
+      }
+      if (!action.unsure) log(game, by, `Put ${items.map(itemName).join(' + ')} on ${target}'s table`);
       break;
     }
     case 'stickerMove': {
@@ -318,6 +339,12 @@ export function applyAction(room, by, action) {
       s.x = unit(action.x);
       s.y = unit(action.y);
       break; // moves aren't logged
+    }
+    case 'stickerConfirm': {
+      const s = game.stickers[action.id];
+      if (!s) return 'Sticker is gone';
+      delete s.unsure;
+      break; // not logged
     }
     case 'stickerFixed': {
       // Fixed stickers stay where they were put; others follow the card under them.
@@ -367,6 +394,38 @@ export function applyAction(room, by, action) {
       delete game.stickers[action.id];
       log(game, by, `Removed ${s.items.map(itemName).join(' + ')} from ${s.tile}'s table`);
       break;
+    }
+    // ----- zones -----
+    case 'zoneSet': {
+      if (!player || !ZONES[action.zone]) return 'Bad action';
+      const box = Array.isArray(action.box) && action.box.length === 4 ? action.box.map(unit) : null;
+      game.zones[target] ??= {};
+      if (box && box[2] - box[0] > 0.02 && box[3] - box[1] > 0.02) game.zones[target][action.zone] = box;
+      else delete game.zones[target][action.zone];
+      break; // not logged
+    }
+    case 'stickerZone': {
+      // A stickered card was moved to one of its owner's piles: the sticker goes, and the log says where.
+      const s = game.stickers[action.id];
+      if (!s || !ZONES[action.zone]) return null;
+      delete game.stickers[action.id];
+      const cards = s.items.filter((it) => it.type === 'card').map((it) => ({ name: it.name, image: it.image, imageLarge: it.imageLarge, scryfallId: it.scryfallId }));
+      if (cards.length) {
+        game.piles[s.tile] ??= {};
+        const pile = (game.piles[s.tile][action.zone] ??= []);
+        pile.push(...cards);
+        if (pile.length > PILE_LIMIT) pile.splice(0, pile.length - PILE_LIMIT);
+      }
+      log(game, by, `${s.items.map(itemName).join(' + ')} ${ZONES[action.zone]} (${s.tile})`);
+      break;
+    }
+    case 'pileRemove': {
+      // Take one card off a pile's list by hand (it was put there by mistake, or came back).
+      const pile = game.piles[target]?.[action.zone];
+      const i = clampInt(action.index, 0, PILE_LIMIT);
+      if (!pile || pile[i] === undefined) return null;
+      pile.splice(i, 1);
+      break; // not logged
     }
     case 'stickersClear': {
       for (const [id, s] of Object.entries(game.stickers)) {
@@ -468,6 +527,7 @@ export function applyAction(room, by, action) {
       game.monarch = null;
       game.initiative = null;
       game.stickers = {};
+      game.piles = {}; // the boxes in game.zones stay: the cameras haven't moved
       game.drawings = [];
       game.log = [];
       log(game, by, `New ${MODES[mode].label} game started at ${startingLife} life`);

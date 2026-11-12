@@ -311,6 +311,61 @@ input[type="range"] { accent-color: var(--accent); }
 }
 @keyframes bar-in { from { opacity: 0; transform: translate(-50%, -6px); } }
 .draw-bar { display: none; }
+.zone-bar { display: none; align-items: center; }
+body[data-tool="zone"] .zone-bar { display: flex; }
+.zone-hint { color: var(--muted); font-size: var(--fs-sm); padding: 0 6px; white-space: nowrap; }
+.zone-bar .chip { padding: 4px 10px; border-radius: var(--r-pill); border: 1px solid var(--border); background: transparent; color: inherit; font-size: var(--fs-sm); }
+.zone-bar .chip.on { background: var(--accent); border-color: var(--accent); color: #fff; }
+/* A player's piles, marked on their camera: faint always, clear while setting them up. */
+.zone-box {
+  position: absolute;
+  border: 1.5px dashed rgba(255, 255, 255, .28);
+  border-radius: 8px;
+  pointer-events: none;
+}
+.zone-box span {
+  position: absolute;
+  left: 4px;
+  top: 3px;
+  padding: 0 5px;
+  border-radius: 4px;
+  background: rgba(0, 0, 0, .45);
+  color: rgba(255, 255, 255, .7);
+  font-size: 10px;
+  line-height: 15px;
+  white-space: nowrap;
+}
+.zone-box[data-zone="graveyard"] { border-color: rgba(200, 200, 210, .4); }
+.zone-box[data-zone="exile"] { border-color: rgba(255, 190, 90, .45); }
+.zone-box[data-zone="library"] { border-color: rgba(120, 190, 255, .45); }
+.zone-box[data-zone="command"] { border-color: rgba(190, 140, 255, .5); }
+body[data-tool="zone"] .zone-box { border-width: 2px; border-color: #fff; background: rgba(255, 255, 255, .06); }
+body[data-tool="zone"] .zone-box span { color: #fff; background: rgba(0, 0, 0, .7); }
+/* Hovering a pile lists what has gone into it. */
+.zone-pop {
+  position: fixed;
+  z-index: 65;
+  min-width: 150px;
+  max-width: 260px;
+  max-height: 60vh;
+  overflow: hidden;
+  padding: 8px 10px;
+  border-radius: 10px;
+  background: rgba(18, 15, 26, .95);
+  border: 1px solid rgba(255, 255, 255, .18);
+  box-shadow: 0 8px 24px rgba(0, 0, 0, .6);
+  pointer-events: none;
+  font-size: var(--fs-sm);
+}
+.zone-pop[hidden] { display: none; }
+.zone-pop b { display: block; margin-bottom: 4px; }
+.zone-pop ol { margin: 0; padding-left: 20px; }
+.zone-pop li { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.zone-pop i { color: var(--muted); font-style: normal; }
+.zone-row .pile-x { margin-left: auto; padding: 0 6px; border: 0; background: transparent; color: var(--faint); cursor: pointer; }
+.zone-row .pile-x:hover { color: inherit; }
+.zone-row { cursor: pointer; }
+.zone-box.drawing { border-style: solid; border-color: var(--accent); background: rgba(139, 92, 246, .15); }
 body[data-tool="pen"] .draw-bar,
 body[data-tool="arrow"] .draw-bar,
 body[data-tool="eraser"] .draw-bar { display: flex; }
@@ -605,7 +660,8 @@ body.hide-names .cmdr-name { display: none; }
 body[data-tool="sticker"] .mark-layer,
 body[data-tool="pen"] .mark-layer,
 body[data-tool="arrow"] .mark-layer,
-body[data-tool="eraser"] .mark-layer { pointer-events: auto; cursor: crosshair; touch-action: none; }
+body[data-tool="eraser"] .mark-layer,
+body[data-tool="zone"] .mark-layer { pointer-events: auto; cursor: crosshair; touch-action: none; }
 body[data-tool="eraser"] .mark-layer { cursor: cell; }
 body[data-tool="identify"] .mark-layer { pointer-events: auto; cursor: help; touch-action: none; }
 body.hide-marks .mark-layer { display: none; }
@@ -613,8 +669,9 @@ body.hide-marks .mark-layer { display: none; }
 .sticker {
   position: absolute;
   /* --sticker-user: viewer's size slider; --sticker-auto: follows the video's on-screen size;
-     --sticker-own: this sticker's own size (shared, set with its corner handle or in the editor) */
-  transform: translate(-50%, -50%) scale(calc(var(--sticker-user, 1) * var(--sticker-auto, 1) * var(--sticker-own, 1)));
+     --sticker-own: this sticker's own size (shared, set with its corner handle or in the editor).
+     The 0.7 is the base size: "100%" used to cover most of a card on a 1080p table camera. */
+  transform: translate(-50%, -50%) scale(calc(0.7 * var(--sticker-user, 1) * var(--sticker-auto, 1) * var(--sticker-own, 1)));
   display: flex;
   flex-direction: column;
   align-items: center;
@@ -639,6 +696,10 @@ body.hide-marks .mark-layer { display: none; }
 .sticker.anchored { transition: left .14s linear, top .14s linear, opacity .4s; }
 .sticker.anchored.dragging { transition: none; }
 .sticker.lost { opacity: .4; border-style: dashed; }
+/* The app's guess at a card: a question until someone answers it. */
+.sticker.unsure { border-style: dashed; border-color: rgba(255, 200, 90, .8); }
+.st-ask { display: flex; align-items: center; gap: 4px; font-size: 11px; color: rgba(255, 215, 130, .95); }
+.st-ask button { min-height: 0; padding: 0 6px; line-height: 16px; border-radius: 6px; font-size: 11px; }
 .track-toast {
   position: fixed;
   left: 50%;
@@ -917,7 +978,8 @@ body.dragging-card, body.dragging-card * { cursor: grabbing !important; }
 @media (max-width: 480px) { .cam-row { grid-template-columns: 1fr; } .cam-row select { grid-column: auto; } }
 
 /* Identify */
-.identify-body { min-width: min(560px, 86vw); }
+/* (No minimum width: it was wider than the dialog, which gave a sideways scrollbar.) */
+.identify-body { overflow-x: hidden; }
 .id-result { display: flex; gap: var(--sp-5); align-items: flex-start; flex-wrap: wrap; }
 .id-big { width: 240px; max-width: 100%; border-radius: 13px; box-shadow: var(--shadow-md); }
 .id-info { flex: 1; min-width: 200px; }
@@ -1038,3 +1100,8 @@ body.dragging-card, body.dragging-card * { cursor: grabbing !important; }
 .cam-preview .chip { position: absolute; right: var(--sp-2); bottom: var(--sp-2); background: var(--glass-strong); }
 .cam-preview .chip.on { background: var(--accent); color: #fff; }
 .read-toast { bottom: 76px; }
+/* A scanned card's suggestion: its picture, big enough to check against the card in hand. */
+.read-toast.with-card { align-items: flex-end; flex-wrap: wrap; max-width: min(92vw, 560px); }
+.read-toast img { width: 170px; border-radius: 9px; box-shadow: 0 6px 24px rgba(0, 0, 0, 0.5); flex: none; }
+.read-toast .read-side { display: flex; flex-direction: column; gap: 10px; flex: 1; min-width: 180px; }
+.read-toast .read-buttons { display: flex; gap: 8px; flex-wrap: wrap; }

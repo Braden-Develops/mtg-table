@@ -23,6 +23,7 @@ window.Tracker = (() => {
   const JUMP = 0.75; // match needed to follow a big move (sliding fast, tapping)
   const RECOVER_NEAR = 0.3; // a card the model finds right where ours was (tapped): low bar
   const RECOVER_FAR = 0.55;
+  const RECOVER_ANYWHERE = 0.7; // a card found anywhere else in the picture (whole-picture finder)
   const FADE_AFTER = 2500; // lost this long: stickers fade for everyone
   const REMOVE_AFTER = 8000; // lost this long (and neither the model nor whole-picture scans find it): removed
   const GLIDE_MS = 400; // a card lost while sliding: assume it kept going this long
@@ -117,6 +118,7 @@ window.Tracker = (() => {
     work.vh = vh;
     work.ctx.drawImage(video, 0, 0, w, h);
     const d = work.ctx.getImageData(0, 0, w, h).data;
+    work.rgb = d; // kept for colourSig()
     // Integral image of the brightness, for fast box blurs.
     const S = work.sum;
     const W1 = w + 1;
@@ -169,6 +171,62 @@ window.Tracker = (() => {
     return (gray[i] * (1 - fx) + gray[i + 1] * fx) * (1 - fy) + (gray[i + w] * (1 - fx) + gray[i + w + 1] * fx) * fy;
   }
 
+  // ---------- which card is which ----------
+  // A card's colours, as a small grid over its face in the card's own frame (so it turns with the
+  // card): what tells two cards apart when their stickers have to be sorted out after a shuffle.
+  // The grey template alone can't: under a webcam most cards are "a box of text over a picture".
+  function colourSig(p, a = p.a, b = p.b) {
+    const { w, h, rgb } = work;
+    if (!rgb) return null;
+    const out = new Float32Array(4 * 6 * 3);
+    const c = Math.cos(p.th);
+    const s = Math.sin(p.th);
+    let k = 0;
+    for (let j = 0; j < 6; j++) {
+      for (let i = 0; i < 4; i++) {
+        const u = (-0.3 + 0.2 * i) * a;
+        const v = (-0.35 + 0.14 * j) * b;
+        const x = Math.min(w - 2, Math.max(1, Math.round(p.cx + u * c - v * s)));
+        const y = Math.min(h - 2, Math.max(1, Math.round(p.cy + u * s + v * c)));
+        let r = 0;
+        let g = 0;
+        let bl = 0;
+        for (let dy = -1; dy <= 1; dy++) {
+          for (let dx = -1; dx <= 1; dx++) {
+            const q = ((y + dy) * w + x + dx) * 4;
+            r += rgb[q];
+            g += rgb[q + 1];
+            bl += rgb[q + 2];
+          }
+        }
+        // Colour apart from brightness (the +: very dark patches have no reliable colour).
+        const sum = r + g + bl + 270;
+        out[k++] = r / sum;
+        out[k++] = g / sum;
+        out[k++] = bl / sum;
+      }
+    }
+    return out;
+  }
+  // 1 = the same colours, 0 = clearly a different card.
+  function colourLike(A, B) {
+    if (!A || !B) return 0.5;
+    let d = 0;
+    for (let i = 0; i < A.length; i++) d += Math.abs(A[i] - B[i]);
+    return Math.max(0, 1 - d / A.length / 0.05);
+  }
+  // How well a found card fits a sticker's card: the grey template (either way up) plus colours.
+  function rate(t, p) {
+    let best = null;
+    for (const th of [p.th, p.th + Math.PI]) {
+      const r = polish(t, { cx: p.cx, cy: p.cy, th });
+      const colour = colourLike(t.col, colourSig({ cx: r.cx, cy: r.cy, th: r.th }, t.a, t.b));
+      const total = r.score + 0.5 * colour;
+      if (!best || total > best.total) best = { th, score: r.score, colour, total };
+    }
+    return best;
+  }
+
   // ---------- templates ----------
   // Sample points over the middle of the card, in card units scaled by its size.
   function buildTemplate(t, pose) {
@@ -203,6 +261,7 @@ window.Tracker = (() => {
     };
     t.tAll = values(t.all);
     t.tCoarse = values(t.coarse);
+    t.col = colourSig(pose);
   }
 
   function offsets(t, th) {
@@ -299,6 +358,7 @@ window.Tracker = (() => {
     t.p = (rx * c + ry * s) / pose.a;
     t.q = (-rx * s + ry * c) / pose.b;
     t.good = { ...t.pose };
+    t.since = performance.now();
     t.phase = 'track';
     t.lostMs = 0;
     t.weakMs = 0;
@@ -350,6 +410,16 @@ window.Tracker = (() => {
         ];
         // A jump must be convincing: half-matches on a half-turned card or the table drag the sticker off.
         for (const r of tries) if (r.score >= JUMP && r.score > best.score) best = r;
+        // (Only without the whole-picture finder, which finds askew cards itself: these extra
+        // guesses also made stickers hop onto a card held up in front of theirs.)
+        if (best.score < JUMP && !hasFinder) {
+          // Turned a little while it moved (a card slid by hand rarely stays square to the camera).
+          const near = Math.round(Math.min(radius, L * 0.6));
+          for (const dth of TILTS) {
+            const r = search(t, lead.cx, lead.cy, p.th + dth, near, 2);
+            if (r.score >= JUMP && r.score > best.score) best = r;
+          }
+        }
         if (best.score < JUMP) {
           // Look wider still around where it was and where it was heading, and be stricter.
           const mid = { cx: (p.cx + lead.cx) / 2, cy: (p.cy + lead.cy) / 2 };
@@ -358,6 +428,10 @@ window.Tracker = (() => {
         }
       }
     }
+    // A jump onto something whose colours are clearly another card's (cards crossing, a card held
+    // up in front) isn't followed.
+    if (best.score >= OK && t.col && Math.hypot(best.cx - p.cx, best.cy - p.cy) > t.a * 0.5
+      && colourLike(t.col, colourSig(best, t.a, t.b)) < 0.25) best = { ...p, score: 0 };
     t.score = best.score;
     t.weakMs = best.score < SURE ? t.weakMs + dt : 0;
     // Weak for long and the model couldn't fix it: treat as lost (it may have left the table).
@@ -390,36 +464,46 @@ window.Tracker = (() => {
     placeFromPose(t);
   }
 
+  // How a lost card may have been turned since it was last seen: as it was, tapped or untapped, and
+  // each of those left a little askew. One group per whole-picture search.
+  const TILTS = [0.17, -0.17, 0.34, -0.34, 0.51, -0.51];
+  const QUARTER = Math.PI / 2;
+  const SCAN_TURNS = [[0], [QUARTER, -QUARTER], [0.17, -0.17], [0.34, -0.34], [QUARTER + 0.17, QUARTER - 0.17],
+    [-QUARTER + 0.17, -QUARTER - 0.17], [0.51, -0.51]];
+
   // Last resort for a card that's been lost a moment (thrown across the mat faster than we could
-  // follow): look for it over the whole picture. Costs a few tens of ms, so one track at a time,
+  // follow, or put down askew): look for it over the whole picture. Costs a few tens of ms, so one track at a time,
   // and at most every SCAN_MS per track. Takes the best clear match, preferring the one nearest to
   // where it was heading if two are about as good (two copies of a basic land).
   function scanAll(t, now) {
     t.scanAt = now + SCAN_MS;
-    const turns = [0, Math.PI / 2, -Math.PI / 2];
-    const th = t.pose.th + turns[t.scans % 3];
+    const groups = hasFinder ? SCAN_TURNS.slice(0, 2) : SCAN_TURNS;
+    const turns = groups[t.scans % groups.length];
     t.scans++;
     const { w, h } = work;
     const m = Math.ceil(t.a * 0.3);
     const peaks = []; // a few best spots, kept apart from each other
-    for (let y = m; y < h - m; y += 3) {
-      for (let x = m; x < w - m; x += 3) {
-        const score = ncc(t, x, y, th, true);
-        if (score < JUMP) continue;
-        const near = peaks.findIndex((q) => Math.hypot(q.cx - x, q.cy - y) < t.a * 0.5);
-        if (near >= 0) {
-          if (score > peaks[near].score) peaks[near] = { score, cx: x, cy: y, th };
-          continue;
+    for (const turn of turns) {
+      const th = t.pose.th + turn;
+      for (let y = m; y < h - m; y += 3) {
+        for (let x = m; x < w - m; x += 3) {
+          const score = ncc(t, x, y, th, true);
+          if (score < JUMP - 0.1) continue; // the angle may be a little off: polished below
+          const near = peaks.findIndex((q) => Math.hypot(q.cx - x, q.cy - y) < t.a * 0.5);
+          if (near >= 0) {
+            if (score > peaks[near].score) peaks[near] = { score, cx: x, cy: y, th };
+            continue;
+          }
+          peaks.push({ score, cx: x, cy: y, th });
+          if (peaks.length > 6) peaks.sort((a, b) => b.score - a.score).pop();
         }
-        peaks.push({ score, cx: x, cy: y, th });
-        if (peaks.length > 6) peaks.sort((a, b) => b.score - a.score).pop();
       }
     }
     const guess = restingGuess(t);
     let best = null;
     for (const q of peaks) {
-      const r = polish(t, search(t, q.cx, q.cy, th, 2, 1));
-      if (r.score < JUMP + 0.07) continue;
+      const r = polish(t, search(t, q.cx, q.cy, q.th, 2, 1));
+      if (r.score < JUMP + 0.07 || (t.col && colourLike(t.col, colourSig(r, t.a, t.b)) < 0.25)) continue;
       r.dist = Math.hypot(r.cx - guess.cx, r.cy - guess.cy);
       if (!best || r.score > best.score + 0.03 || (Math.abs(r.score - best.score) <= 0.03 && r.dist < best.dist)) best = r;
     }
@@ -449,7 +533,9 @@ window.Tracker = (() => {
       const m = e.data;
       if (m.t === 'ready') {
         detector = 'ready';
-        console.info(`Card tracking ready (model loaded in ${m.ms} ms)`);
+        hasFinder = !!m.finder;
+        console.info(hasFinder ? 'Card finder loaded (whole-picture model)' : 'No whole-picture card finder on this server: using the corner model alone');
+        console.info(`Card tracking ready (model loaded in ${m.ms} ms, ${m.threads || 1} thread${m.threads > 1 ? 's' : ''})`);
       } else if (m.t === 'error') {
         detector = 'failed';
         console.warn('Card tracking unavailable:', m.message);
@@ -458,7 +544,8 @@ window.Tracker = (() => {
         if (m.message) console.warn('Card finder error:', m.message);
         const done = pending.get(m.id);
         pending.delete(m.id);
-        lastDetMs = m.ms || lastDetMs;
+        if (m.scan) lastScanMs = m.ms || lastScanMs;
+        else lastDetMs = m.ms || lastDetMs;
         done?.(m.cards || []);
       }
     };
@@ -469,7 +556,51 @@ window.Tracker = (() => {
     worker.postMessage({ t: 'load', code });
   }
   let lastDetMs = 0;
+  let lastScanMs = 0;
   let lastJob = null;
+  // The whole-picture card finder (see track-worker.js): one look outlines every card in the
+  // camera's picture, wherever and however it lies. A card it scores this high is taken as found.
+  let hasFinder = false;
+  const FIND_SURE = 0.5;
+  let scanCanvas = null;
+  let scanCtx = null;
+  const scanHistory = []; // [{ at, spots: [[x, y]] }] card centres in video pixels
+  let lastScan = null; // { at, cards }: looks a moment apart share one run
+
+  // Every card in the camera's picture: [{ score, quad }], corners in video pixels, the card's own
+  // top-left corner first.
+  async function scanCards(video) {
+    const now = performance.now();
+    if (lastScan && now - lastScan.at < 60) return lastScan.cards;
+    if (!scanCanvas) {
+      scanCanvas = document.createElement('canvas');
+      scanCanvas.width = 640;
+      scanCanvas.height = 360;
+      scanCtx = scanCanvas.getContext('2d', { willReadFrequently: true });
+    }
+    const vw = video.videoWidth;
+    const vh = video.videoHeight;
+    // A camera that isn't 16:9 is fitted inside the 640x360 picture.
+    const k = Math.min(640 / vw, 360 / vh);
+    const ox = (640 - vw * k) / 2;
+    const oy = (360 - vh * k) / 2;
+    scanCtx.fillStyle = '#727272';
+    scanCtx.fillRect(0, 0, 640, 360);
+    scanCtx.drawImage(video, ox, oy, vw * k, vh * k);
+    const pixels = scanCtx.getImageData(0, 0, 640, 360).data;
+    const id = ++reqId;
+    worker.postMessage({ t: 'scan', id, pixels }, [pixels.buffer]);
+    const cards = (await new Promise((resolve) => {
+      pending.set(id, resolve);
+      setTimeout(() => { if (pending.delete(id)) { console.warn('Card finder: a look timed out'); resolve([]); } }, 8000);
+    })).map((c) => ({ score: c.score, quad: c.quad.map(([u, v]) => [(u * 640 - ox) / k, (v * 360 - oy) / k]) }));
+    lastScan = { at: performance.now(), cards };
+    // Where cards were lying, for a while back: a sticker that loses its card must not jump onto a
+    // card that was already somewhere else at the time.
+    scanHistory.push({ at: lastScan.at, spots: cards.filter((c) => c.score >= FIND_SURE).map((c) => [(c.quad[0][0] + c.quad[2][0]) / 2, (c.quad[0][1] + c.quad[2][1]) / 2]) });
+    if (scanHistory.length > 40) scanHistory.shift();
+    return cards;
+  }
 
   // Run the model on a frame of the video: a rotated rectangle { cx, cy, th, w, h } in video pixels,
   // squashed to the model's square input (see cardfind.js for why the frame's shape matters).
@@ -493,7 +624,11 @@ window.Tracker = (() => {
     const pixels = detCtx.getImageData(0, 0, DET, DET).data;
     const id = ++reqId;
     worker.postMessage({ t: 'detect', id, pixels }, [pixels.buffer]);
-    return new Promise((resolve) => pending.set(id, resolve))
+    return new Promise((resolve) => {
+      pending.set(id, resolve);
+      // A look that never comes back must not hold up every later one.
+      setTimeout(() => { if (pending.delete(id)) { console.warn('Card finder: a look timed out'); resolve([]); } }, 8000);
+    })
       .then((cards) => cards.map((c) => ({ score: c.score, quad: c.quad.map(([u, v]) => window.CardFind.fromFrame(f, u, v)) })));
   }
 
@@ -512,12 +647,22 @@ window.Tracker = (() => {
     try {
       const vw = video.videoWidth;
       const vh = video.videoHeight;
+      if (hasFinder) {
+        // Every card in the picture; the caller picks by place and size.
+        return (await scanCards(video)).map((c) => {
+          const p = window.CardFind.quadPose(c.quad);
+          return {
+            score: c.score, sure: c.score >= FIND_SURE, shape: p.shape, a: p.a / vh, b: p.b / vh, th: p.th, cx: p.cx / vw, cy: p.cy / vh,
+            quad: c.quad.map(([qx, qy]) => [qx / vw, qy / vh]),
+          };
+        }).sort((p, q) => q.score - p.score);
+      }
       const len = (side * vh) / 2;
       const r = await window.CardFind.locate((f) => runDetector(video, f), [x * vw, y * vh], {
-        size: len * 0.716, angle: 0, only: !opts.table, near: len * 0.5, bounds: [vw, vh], maxRuns: opts.table ? 5 : 3,
+        size: len * 0.716, angle: opts.angle || 0, quick: true, only: !opts.table, near: len * 0.5, bounds: [vw, vh], maxRuns: opts.table ? 5 : 3,
       });
       return [r.card, ...r.others].filter(Boolean).map((p) => ({
-        score: p.score, shape: p.shape, a: p.a / vh, b: p.b / vh, cx: p.cx / vw, cy: p.cy / vh, quad: p.quad.map(([qx, qy]) => [qx / vw, qy / vh]),
+        score: p.score, sure: !!p.sure, shape: p.shape, a: p.a / vh, b: p.b / vh, th: p.th, cx: p.cx / vw, cy: p.cy / vh, quad: p.quad.map(([qx, qy]) => [qx / vw, qy / vh]),
       }));
     } finally {
       jobBusy = false;
@@ -542,17 +687,29 @@ window.Tracker = (() => {
   // Resolves with poses in working pixels, best first; only cards about the size of the others.
   async function locate(video, x, y, opts = {}) {
     const k = work.vw / work.w;
+    if (hasFinder) {
+      // opts.anywhere: every card in the picture (a lost card may be far from where it was).
+      const found = (await scanCards(video))
+        .map((c) => { const quad = c.quad.map(([qx, qy]) => [qx / k, qy / k]); return { ...poseFromQuad(quad), quad, score: c.score, sure: c.score >= FIND_SURE }; })
+        .filter((p) => opts.anywhere || insideQuad([x, y], p.quad) || (opts.near && Math.hypot(p.cx - x, p.cy - y) < opts.near))
+        .filter((p) => (p.sure || opts.faint) && p.shape > 0.6 && (!cardLen || (p.b > cardLen * 0.6 && p.b < cardLen * 1.6)))
+        .sort((p, q) => q.score - p.score);
+      lastJob = { at: [Math.round(x), Math.round(y)], looks: 1, scan: lastScanMs, sure: found.some((p) => p.sure), found: found.map((p) => `${Math.round(p.cx)},${Math.round(p.cy)} s${p.score.toFixed(2)} sh${p.shape.toFixed(2)}`) };
+      return found;
+    }
     const run = (f) => runDetector(video, { cx: f.cx * k, cy: f.cy * k, th: f.th, w: f.w * k, h: f.h * k })
       .then((cards) => cards.map((c) => ({ score: c.score, quad: c.quad.map(([qx, qy]) => [qx / k, qy / k]) })));
     const r = await window.CardFind.locate(run, [x, y], {
       size: cardLen ? cardLen * 0.716 : 0,
       // No card measured on this camera yet: a rough look around the point gives a first size.
       span: cardLen ? 0 : Math.min(work.w, work.h) * 0.5,
-      angle: opts.angle ?? null, near: opts.near || 0, bounds: [work.w, work.h], maxRuns: opts.maxRuns || 6,
+      angle: opts.angle ?? null, near: opts.near || 0, bounds: [work.w, work.h], maxRuns: opts.maxRuns || 6, skip: opts.skip || 0, quick: true,
     });
     const found = (r.sure || opts.faint ? [r.card, ...r.others] : r.others.filter((p) => p.sure)).filter(Boolean)
-      .map((p) => ({ ...poseFromQuad(p.quad), quad: p.quad, score: p.score }))
-      .filter((p) => p.shape > 0.6 && (!cardLen || (p.b > cardLen * 0.6 && p.b < cardLen * 1.6)));
+      .map((p) => ({ ...poseFromQuad(p.quad), quad: p.quad, score: p.score, sure: !!p.sure }))
+      // An outline the model wasn't sure of is only taken when it is clean: a lopsided one is usually
+      // a card seen at the wrong angle, and a sticker anchored to it is lost at the first nudge.
+      .filter((p) => (p.sure ? p.shape > 0.6 : p.shape > 0.85 && p.score >= 0.7) && (!cardLen || (p.b > cardLen * 0.6 && p.b < cardLen * 1.6)));
     lastJob = { at: [Math.round(x), Math.round(y)], looks: r.runs, sure: r.sure, found: found.map((p) => `${Math.round(p.cx)},${Math.round(p.cy)} s${p.score.toFixed(2)} sh${p.shape.toFixed(2)}`) };
     return found;
   }
@@ -586,7 +743,11 @@ window.Tracker = (() => {
     const pt = [t.x * work.w, t.y * work.h];
     // Each retry spends a little longer looking (more sizes and angles).
     const seeded = fromIdentify(pt);
-    const cards = seeded ? [seeded] : await locate(video, pt[0], pt[1], { faint: true, maxRuns: 6 + 2 * Math.min(t.tries, 2) });
+    // Each retry carries on where the last stopped: the sticker dead centre on a card lying any
+    // way round, then towards one side of it, then towards a corner (see cardfind.js). Without a card size yet,
+    // each retry just looks a little longer.
+    const [skip, maxRuns] = cardLen ? [[0, 10], [10, 12], [22, 8]][Math.min(t.tries, 2)] : [0, 6 + 2 * Math.min(t.tries, 2)];
+    const cards = seeded ? [seeded] : await locate(video, pt[0], pt[1], { faint: true, skip, maxRuns });
     if (t.phase !== 'acquire' || !tracks.has(t.id)) return; // moved or removed meanwhile
     const under = cards.filter((p) => insideQuad([t.x * work.w, t.y * work.h], p.quad))
       .sort((a, b) => b.score * b.shape - a.score * a.shape)[0];
@@ -607,21 +768,37 @@ window.Tracker = (() => {
     t.retryAt = now + 700;
     // Where it was last seen for sure (a doubtful track may have drifted onto something else).
     const at = doubt || t.weakMs > 0 ? { ...t.good } : restingGuess(t);
-    const cards = await locate(video, at.cx, at.cy, { near: t.b * (doubt ? 0.75 : 1.3), angle: t.pose.th, maxRuns: doubt ? 4 : 7 });
+    const cards = await locate(video, at.cx, at.cy, { near: t.b * (doubt ? 0.75 : 1.3), anywhere: !doubt, angle: t.pose.th, maxRuns: doubt ? 4 : 7 });
     if (t.phase !== 'track' || !tracks.has(t.id) || (!doubt && t.lostMs === 0)) return; // found meanwhile
     let best = null;
+    // Cards that were lying elsewhere while ours was still being followed, and cards other stickers
+    // are on, aren't ours (a hand covering our card must not send its sticker to a neighbour).
+    const k = work.vw / work.w;
+    const lostAt = now - t.lostMs;
+    const earlier = scanHistory.filter((s) => s.at < lostAt - 100).pop();
+    const taken = (p) => [...tracks.values()].some((o) => o !== t && o.phase === 'track' && Math.hypot(o.pose.cx - p.cx, o.pose.cy - p.cy) < o.a * 0.5)
+      || (earlier && earlier.spots.some(([sx, sy]) => Math.hypot(sx / k - p.cx, sy / k - p.cy) < p.a * 0.4));
+    // Several stickers may have lost their cards at once (cards swapped or shuffled about): a card
+    // goes to the sticker it fits best, not to whichever sticker asks first or was nearest.
+    const rivals = doubt ? [] : [...tracks.values()].filter((o) => o !== t && o.phase === 'track' && o.lostMs > 0);
+    const theirs = (p, mine) => rivals.some((o) => rate(o, p).total > mine + 0.03);
     for (const p of cards) {
       // Only a card where ours was actually last seen gets the low bar (tapped in place); one near
       // where we guess it slid to may be a different card.
-      const near = Math.hypot(p.cx - t.pose.cx, p.cy - t.pose.cy) < t.b * 0.75
+      const dist = Math.hypot(p.cx - t.pose.cx, p.cy - t.pose.cy);
+      const near = dist < t.b * 0.75
         || (doubt && Math.hypot(p.cx - at.cx, p.cy - at.cy) < t.b * 0.75);
       if (doubt && !near) continue;
-      for (const th of [p.th, p.th + Math.PI]) {
-        // The template is from before: its size may differ a bit, so polish around the found pose.
-        const r = polish(t, { cx: p.cx, cy: p.cy, th });
-        const rank = r.score - (near ? 0 : 0.1);
-        if (r.score >= (near ? RECOVER_NEAR : RECOVER_FAR) && (!best || rank > best.rank)) best = { pose: p, th, rank };
-      }
+      if (!near && taken(p)) continue;
+      // Further away than a short slide: it has to look a lot like ours.
+      const bar = near ? RECOVER_NEAR : dist < t.b * 1.5 ? RECOVER_FAR : RECOVER_ANYWHERE;
+      // The template is from before: its size may differ a bit, so rate() polishes around the found pose.
+      const r = rate(t, p);
+      p.fit = r;
+      // Its colours must not be clearly another card's (two cards swapped in place look "near").
+      if (r.score < bar || r.colour < 0.25 || theirs(p, r.total)) continue;
+      const rank = r.total - (near ? 0 : 0.1);
+      if (!best || rank > best.rank) best = { pose: p, th: r.th, rank };
     }
     // Nothing looks like the template (lighting changed, something covered part of it while it was
     // learned), but the model clearly sees one card the same size close to where ours was, and no
@@ -630,6 +807,7 @@ window.Tracker = (() => {
       const mine = cards.filter((p) => p.score > 0.55 && p.shape > 0.85
         && Math.abs(p.b / t.b - 1) < 0.25
         && Math.hypot(p.cx - t.pose.cx, p.cy - t.pose.cy) < t.b * 1.3
+        && (!p.fit || (p.fit.colour >= 0.25 && !theirs(p, p.fit.total)))
         && ![...tracks.values()].some((o) => o !== t && o.phase === 'track' && !o.lostMs
           && Math.hypot(o.pose.cx - p.cx, o.pose.cy - p.cy) < o.a * 0.5));
       if (mine.length === 1) {
@@ -699,13 +877,14 @@ window.Tracker = (() => {
     const lostCount = following.filter((t) => t.lostMs > 0).length;
     const disturbed = following.length >= 3 && lostCount / following.length >= 0.7;
     for (const t of following) {
-      if (t.lostMs > REMOVE_AFTER && t.recoverTries >= 2 && t.scans >= 3 && !disturbed) removeLost(t);
+      if (t.lostMs > REMOVE_AFTER && t.recoverTries >= 2 && t.scans >= (hasFinder ? 3 : SCAN_TURNS.length) && !disturbed) removeLost(t);
     }
     // One whole-picture search per tick at most, for a card lost a little while.
     const scan = following.find((t) => t.lostMs > 250 && now >= (t.scanAt || 0));
     if (scan && !disturbed) scanAll(scan, now);
     nextDetection(video, now);
     persist(now);
+    checkZones(now);
     broadcast(now);
     costMs = costMs * 0.9 + (performance.now() - t0) * 0.1;
   }
@@ -771,8 +950,43 @@ window.Tracker = (() => {
     }
   }
 
+  // ---------- zones ----------
+  // The player's piles (command zone, library, graveyard, exile), marked as boxes on their camera
+  // with the Zones tool. A stickered card that comes to rest in one has gone there: the sticker is
+  // removed and the game log says where it went.
+  const ZONE_SAYS = { command: 'back to the command zone', library: 'to the library', graveyard: 'to the graveyard', exile: 'to exile' };
+  function zoneAt(cx, cy, slack = 0) {
+    for (const [zone, b] of Object.entries(state?.zones?.[me] || {})) {
+      if (ZONE_SAYS[zone] && cx >= b[0] - slack && cx <= b[2] + slack && cy >= b[1] - slack && cy <= b[3] + slack) return zone;
+    }
+    return null;
+  }
+  function toZone(t, zone) {
+    const s = state?.stickers?.[t.id];
+    tracks.delete(t.id);
+    window.Marks.setLive(t.id, null);
+    if (!s) return;
+    act({ type: 'stickerZone', id: t.id, zone });
+    const name = s.items.find((it) => it.type === 'card')?.name || 'Card';
+    showUndo(s, `${name} went ${ZONE_SAYS[zone]}.`);
+  }
+  function checkZones(now) {
+    if (!work || !state?.zones?.[me]) return;
+    for (const t of [...tracks.values()]) {
+      // At rest, and following its card for sure.
+      if (t.phase !== 'track' || t.lostMs > 0 || t.weakMs > 0 || now - Math.max(t.lastMove || 0, t.since || 0) < PERSIST_MS) continue;
+      const zone = zoneAt(t.pose.cx / work.w, t.pose.cy / work.h);
+      if (zone) toZone(t, zone);
+    }
+  }
+
   // ---------- removal ----------
   function removeLost(t) {
+    // Last seen in (or at the edge of) a pile: it went there (turned face down on the library, slid
+    // under the graveyard), not off the table.
+    const last = t.good || t.pose;
+    const zone = work && last ? zoneAt(last.cx / work.w, last.cy / work.h, 0.03) : null;
+    if (zone) return toZone(t, zone);
     const s = state?.stickers?.[t.id];
     tracks.delete(t.id);
     if (!s) return;
@@ -781,7 +995,7 @@ window.Tracker = (() => {
   }
 
   let toastTimer = null;
-  function showUndo(s) {
+  function showUndo(s, says = null) {
     let el = document.getElementById('track-toast');
     if (!el) {
       el = document.createElement('div');
@@ -791,7 +1005,7 @@ window.Tracker = (() => {
     }
     const name = s.items.find((it) => it.type === 'card')?.name || 'a sticker';
     el.innerHTML = '<span></span><button type="button">Undo</button>';
-    el.querySelector('span').textContent = `Card left the table: removed ${name}.`;
+    el.querySelector('span').textContent = says || `Card left the table: removed ${name}.`;
     el.querySelector('button').onclick = () => {
       act({ type: 'stickerAdd', id: s.id, target: s.tile, x: s.x, y: s.y, items: s.items });
       if (s.scale && s.scale !== 1) setTimeout(() => act({ type: 'stickerScale', id: s.id, scale: s.scale }), 300);
@@ -863,7 +1077,7 @@ window.Tracker = (() => {
 
   function debug() {
     return {
-      detector, lastJob, costMs: Math.round(costMs * 10) / 10, detMs: lastDetMs, cardLen,
+      detector, hasFinder, lastJob, costMs: Math.round(costMs * 10) / 10, detMs: lastDetMs, scanMs: lastScanMs, cardLen,
       tracks: [...tracks.values()].map((t) => ({ id: t.id, phase: t.phase, via: t.via, scans: t.scans, x: t.x, y: t.y, score: t.score, lostMs: t.lostMs, pose: t.pose })),
     };
   }
@@ -892,6 +1106,17 @@ window.Tracker = (() => {
   }
 
   // For testing from the console: what the model finds around a point (working pixels).
+  // Debugging: how alike the cards in view look to colourLike(), two frames apart (the diagonal is
+  // each card against itself a moment later).
+  async function colours() {
+    const video = localVideo();
+    const k = work.vw / work.w;
+    const poses = (await scanCards(video)).filter((c) => c.score >= FIND_SURE).map((c) => poseFromQuad(c.quad.map(([qx, qy]) => [qx / k, qy / k])));
+    const first = poses.map((p) => colourSig(p));
+    await new Promise((r) => setTimeout(r, 400));
+    return poses.map((p, i) => poses.map((q, j) => Math.max(colourLike(first[i], colourSig(q)), colourLike(first[i], colourSig({ ...q, th: q.th + Math.PI }))).toFixed(2)).join(' ') + `  @${Math.round(p.cx)},${Math.round(p.cy)}`);
+  }
+
   async function probe(x, y, opts = {}) {
     while (jobBusy) await new Promise((r) => setTimeout(r, 50));
     jobBusy = true;
@@ -902,5 +1127,5 @@ window.Tracker = (() => {
     }
   }
 
-  return { init, setRoom, onData, sync, setEnabled, isEnabled: () => enabled, status, debug, probe, noteIdentified, findCards, stickerSpots, cardSize };
+  return { init, setRoom, onData, sync, setEnabled, isEnabled: () => enabled, status, debug, probe, noteIdentified, findCards, stickerSpots, cardSize, hasFinder: () => hasFinder, colours, zones: () => state?.zones?.[me] || {} };
 })();

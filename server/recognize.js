@@ -392,7 +392,7 @@ export function findCard(rgb, sw, sh, hint, size = 0) {
 // name -> { at, complete, list: [{ key, small, normal }] }.
 const ARTS_FILE = path.join(DATA_DIR, 'arts.json');
 const ARTS_MAX_AGE = 30 * 24 * 3600_000; // look for new printings once a month
-const ARTS_RETRY = 3600_000; // after Scryfall couldn't be reached
+const ARTS_RETRY = 600_000; // after Scryfall couldn't be reached
 let arts = {};
 try {
   const saved = JSON.parse(fs.readFileSync(ARTS_FILE, 'utf8'));
@@ -439,7 +439,7 @@ async function listArts(card) {
   let entry = arts[card.name];
   if (!listFresh(entry)) {
     let more = null;
-    try { more = await artworks(card.name); } catch { /* Scryfall unreachable: try again later */ }
+    try { more = await artworks(card.name); } catch (err) { console.warn('Could not list printings of', card.name, '-', err.message, '(trying again later)'); }
     const list = [...(entry?.list || []), ...(more || [])].filter((x, i, all) => okImage(x.normal) && all.findIndex((y) => y.key === x.key) === i);
     entry = { at: Date.now(), complete: !!more, list };
     arts[card.name] = entry;

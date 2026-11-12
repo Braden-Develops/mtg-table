@@ -16,6 +16,8 @@ window.Marks = (() => {
   let drawColor = null; // chosen in the tools bar; defaults to the player's own color
   let drawSize = 1;
   let pendingItems = null; // items waiting to be placed (from card lookup)
+  const ZONES = { command: 'Command zone', library: 'Library', graveyard: 'Graveyard', exile: 'Exile' };
+  let zoneKind = 'graveyard'; // which pile the zone tool is marking
   const tiles = new Map(); // tile -> { name, layer, canvas, stickers, video }
 
   const $ = (id) => document.getElementById(id);
@@ -100,6 +102,17 @@ window.Marks = (() => {
       window.AutoRead?.setEnabled(!window.AutoRead.isEnabled());
       showReadHeld();
     });
+    // Cards lying on my table are recognised and tagged by themselves.
+    const showAutoTag = () => {
+      const on = !!window.AutoRead?.isTagging();
+      $('auto-tag-btn').classList.toggle('on', on);
+      $('auto-tag-btn').textContent = on ? 'Tag cards on my table' : 'Table cards not tagged';
+    };
+    showAutoTag();
+    $('auto-tag-btn').addEventListener('click', () => {
+      window.AutoRead?.setTagging(!window.AutoRead.isTagging());
+      showAutoTag();
+    });
     // Drawing color and thickness: per-viewer, remembered on this device.
     const load = (key, fallback) => { try { return localStorage.getItem(key) ?? fallback; } catch { return fallback; } };
     const save = (key, value) => { try { localStorage.setItem(key, value); } catch { /* ignore */ } };
@@ -141,6 +154,33 @@ window.Marks = (() => {
       pendingItems = null;
       setTool('select');
     });
+    for (const btn of document.querySelectorAll('[data-zone]')) {
+      btn.addEventListener('click', () => {
+        zoneKind = btn.dataset.zone;
+        for (const b of document.querySelectorAll('[data-zone]')) b.classList.toggle('on', b === btn);
+      });
+    }
+    $('zone-clear')?.addEventListener('click', () => act({ type: 'zoneSet', target: me, zone: zoneKind, box: null }));
+    // The pile panel (opened by clicking a zone): hover a card to see it, click to put it on the table.
+    $('zone-close').addEventListener('click', closeZonePanel);
+    for (const id of ['game-btn', 'deck-btn']) $(id)?.addEventListener('click', () => { $('zone-panel').hidden = true; zonePanel = null; });
+    const zb = $('zone-body');
+    zb.addEventListener('mousemove', (ev) => {
+      const row = ev.target.closest('[data-large]');
+      if (row?.dataset.large) showPreview(row.dataset.large, ev);
+      else hidePreview();
+    });
+    zb.addEventListener('mouseleave', hidePreview);
+    zb.addEventListener('click', (ev) => {
+      const row = ev.target.closest('.zone-row');
+      if (!row || !zonePanel) return;
+      const i = Number(row.dataset.i);
+      const card = state?.piles?.[zonePanel.name]?.[zonePanel.zone]?.[i];
+      if (!card) return;
+      hidePreview();
+      if (ev.target.closest('.pile-x')) act({ type: 'pileRemove', target: zonePanel.name, zone: zonePanel.zone, index: i });
+      else showCard({ ...card, type: 'card' });
+    });
     wireEditor();
     setInterval(tickFades, 400);
     setInterval(expireLive, 1000);
@@ -167,13 +207,14 @@ window.Marks = (() => {
     }
     const layer = document.createElement('div');
     layer.className = 'mark-layer';
-    layer.innerHTML = '<canvas class="draw-canvas"></canvas><div class="sticker-box"></div>';
+    layer.innerHTML = '<canvas class="draw-canvas"></canvas><div class="zone-boxes"></div><div class="sticker-box"></div>';
     tile.appendChild(layer);
     const entry = {
       name,
       layer,
       canvas: layer.querySelector('canvas'),
       stickers: layer.querySelector('.sticker-box'),
+      zones: layer.querySelector('.zone-boxes'),
       video: tile.querySelector('video'),
       live: null, // stroke being drawn right now
     };
@@ -182,6 +223,17 @@ window.Marks = (() => {
     entry.video.addEventListener('resize', () => layout(tile));
     new ResizeObserver(() => layout(tile)).observe(tile);
     wireLayer(tile, entry);
+    tile.addEventListener('mousemove', (ev) => hoverZone(entry, ev));
+    // In Select, a click on a zone opens its pile (before the tile's own click, which enlarges it).
+    tile.addEventListener('click', (ev) => {
+      if (tool !== 'select' || ev.target.closest('.sticker, button')) return;
+      const zone = zoneUnder(entry, ev);
+      if (!zone) return;
+      ev.stopPropagation();
+      ev.preventDefault();
+      openZonePanel(entry.name, zone);
+    }, true);
+    tile.addEventListener('mouseleave', hideZonePop);
     layout(tile);
   }
 
@@ -241,6 +293,28 @@ window.Marks = (() => {
         return;
       }
       layer.setPointerCapture(ev.pointerId);
+      if (tool === 'zone') {
+        // Piles are marked on your own camera (other players mark theirs). On a box: move it, or
+        // resize it by an edge or corner. On empty table: draw the picked zone.
+        if (entry.name !== me) return;
+        const r = entry.layer.getBoundingClientRect();
+        const mx = pt[0] * r.width;
+        const my = pt[1] * r.height;
+        const EDGE = 12;
+        let grab = null;
+        for (const [zone, b] of Object.entries(state?.zones?.[me] || {})) {
+          if (!ZONES[zone]) continue;
+          const [x0, y0, x1, y1] = [b[0] * r.width, b[1] * r.height, b[2] * r.width, b[3] * r.height];
+          if (mx < x0 - EDGE || mx > x1 + EDGE || my < y0 - EDGE || my > y1 + EDGE) continue;
+          const ex = Math.abs(mx - x0) < EDGE ? 0 : Math.abs(mx - x1) < EDGE ? 2 : -1;
+          const ey = Math.abs(my - y0) < EDGE ? 1 : Math.abs(my - y1) < EDGE ? 3 : -1;
+          grab = { zone, mode: ex >= 0 || ey >= 0 ? 'resize' : 'move', ex, ey, start: b.slice() };
+          if (grab.mode === 'resize') break;
+        }
+        if (grab) pickZone(grab.zone);
+        entry.zoneDrag = grab ? { ...grab, from: pt, box: grab.start.slice() } : { zone: zoneKind, mode: 'new', from: pt, box: [pt[0], pt[1], pt[0], pt[1]] };
+        return;
+      }
       if (tool === 'eraser') {
         entry.erasing = true;
         eraseAt(tile, entry, ev);
@@ -253,6 +327,23 @@ window.Marks = (() => {
         eraseAt(tile, entry, ev);
         return;
       }
+      if (entry.zoneDrag) {
+        const d = entry.zoneDrag;
+        const p = pointFromEvent(ev, entry);
+        if (d.mode === 'new') d.box = [Math.min(d.from[0], p[0]), Math.min(d.from[1], p[1]), Math.max(d.from[0], p[0]), Math.max(d.from[1], p[1])];
+        else if (d.mode === 'move') {
+          const dx = Math.min(1 - d.start[2], Math.max(-d.start[0], p[0] - d.from[0]));
+          const dy = Math.min(1 - d.start[3], Math.max(-d.start[1], p[1] - d.from[1]));
+          d.box = [d.start[0] + dx, d.start[1] + dy, d.start[2] + dx, d.start[3] + dy];
+        } else {
+          const b = d.start.slice();
+          if (d.ex >= 0) b[d.ex] = p[0];
+          if (d.ey >= 0) b[d.ey] = p[1];
+          d.box = [Math.min(b[0], b[2]), Math.min(b[1], b[3]), Math.max(b[0], b[2]), Math.max(b[1], b[3])];
+        }
+        renderZones(tile);
+        return;
+      }
       if (!entry.live) return;
       const pt = pointFromEvent(ev, entry);
       const last = entry.live.points[entry.live.points.length - 1];
@@ -262,6 +353,18 @@ window.Marks = (() => {
       drawCanvas(tile);
     });
     const finish = () => {
+      if (entry.zoneDrag) {
+        const { zone, box, start } = entry.zoneDrag;
+        entry.zoneDrag = null;
+        // A click without a drag changes nothing.
+        const changed = !start || box.some((v, i) => Math.abs(v - start[i]) > 0.002);
+        if (changed && box[2] - box[0] > 0.02 && box[3] - box[1] > 0.02) {
+          act({ type: 'zoneSet', target: entry.name, zone, box });
+          entry.zonePending = { zone, box }; // shown until the server's copy arrives
+        }
+        renderZones(tile);
+        return;
+      }
       entry.erasing = false;
       const live = entry.live;
       entry.live = null;
@@ -283,6 +386,103 @@ window.Marks = (() => {
       return;
     }
     openEditor({ mode: 'new', tile: tileName, x, y });
+  }
+
+  // ---------- zones ----------
+  function renderZones(tile) {
+    const e = tiles.get(tile);
+    if (!e?.zones) return;
+    const boxes = { ...(state?.zones?.[e.name] || {}) };
+    if (e.zonePending) boxes[e.zonePending.zone] = e.zonePending.box;
+    const drag = e.zoneDrag;
+    if (drag) boxes[drag.zone] = drag.box;
+    e.zones.innerHTML = Object.entries(boxes).filter(([zone]) => ZONES[zone]).map(([zone, b]) => (
+      `<div class="zone-box${drag?.zone === zone ? ' drawing' : ''}" data-zone="${zone}" style="left:${b[0] * 100}%;top:${b[1] * 100}%;width:${(b[2] - b[0]) * 100}%;height:${(b[3] - b[1]) * 100}%"><span>${ZONES[zone]}</span></div>`
+    )).join('');
+  }
+
+  function pickZone(zone) {
+    zoneKind = zone;
+    for (const b of document.querySelectorAll('[data-zone]')) b.classList.toggle('on', b.dataset.zone === zone);
+  }
+
+  // Which of a player's zones is under this pointer event?
+  function zoneUnder(entry, ev) {
+    const r = entry.layer.getBoundingClientRect();
+    const x = (ev.clientX - r.left) / r.width;
+    const y = (ev.clientY - r.top) / r.height;
+    return Object.entries(state?.zones?.[entry.name] || {})
+      .find(([zone, b]) => ZONES[zone] && x >= b[0] && x <= b[2] && y >= b[1] && y <= b[3])?.[0] || null;
+  }
+
+  // Clicking a zone opens its pile in the side panel, like a deck: every card that went there this
+  // game, newest first. Hover one to see it; click it to put it back on the table as a sticker.
+  let zonePanel = null; // { name, zone } while open
+  function openZonePanel(name, zone) {
+    zonePanel = { name, zone };
+    $('game-panel').hidden = true;
+    $('deck-panel').hidden = true;
+    $('zone-panel').hidden = false;
+    document.body.classList.add('panel-open');
+    hideZonePop();
+    renderZonePanel();
+  }
+  function closeZonePanel() {
+    zonePanel = null;
+    $('zone-panel').hidden = true;
+    document.body.classList.remove('panel-open');
+  }
+  function renderZonePanel() {
+    if (!zonePanel) return;
+    const { name, zone } = zonePanel;
+    const pile = state?.piles?.[name]?.[zone] || [];
+    $('zone-title').textContent = `${name}'s ${ZONES[zone].toLowerCase()}`;
+    const rows = pile.map((c, i) => (
+      `<li class="deck-row zone-row" data-i="${i}" data-large="${esc(c.imageLarge || c.image || `https://api.scryfall.com/cards/named?format=image&version=normal&exact=${encodeURIComponent(c.name)}`)}">
+        <span class="qty">${pile.length - i}</span>
+        <span class="cname">${esc(c.name)}</span>
+        <button class="pile-x" title="Take it off this list">✕</button>
+      </li>`
+    )).reverse();
+    $('zone-body').innerHTML = `<p class="muted small">${pile.length ? `${pile.length} card${pile.length === 1 ? '' : 's'}, newest first. Click a card to put it back on the table.` : 'No cards seen going here yet. A stickered card moved into this box is listed here.'}</p>
+      <ul class="deck-list">${rows.join('')}</ul>`;
+  }
+
+  // Hovering a pile lists the cards that have gone into it this game, newest first.
+  function hoverZone(entry, ev) {
+    const r = entry.layer.getBoundingClientRect();
+    const x = (ev.clientX - r.left) / r.width;
+    const y = (ev.clientY - r.top) / r.height;
+    const hit = entry.zoneDrag ? null : Object.entries(state?.zones?.[entry.name] || {})
+      .find(([zone, b]) => ZONES[zone] && x >= b[0] && x <= b[2] && y >= b[1] && y <= b[3]);
+    entry.layer.parentElement.style.cursor = hit && tool === 'select' ? 'pointer' : '';
+    if (!hit || ev.target.closest('.sticker')) return hideZonePop();
+    let pop = $('zone-pop');
+    if (!pop) {
+      pop = document.createElement('div');
+      pop.id = 'zone-pop';
+      pop.className = 'zone-pop';
+      document.body.appendChild(pop);
+    }
+    const cards = (state?.piles?.[entry.name]?.[hit[0]] || []).map((c) => c.name).reverse();
+    const key = `${entry.name}|${hit[0]}|${cards.length}|${cards[0] || ''}`;
+    if (pop.dataset.key !== key) {
+      pop.dataset.key = key;
+      const shown = cards.slice(0, 30);
+      pop.innerHTML = `<b>${esc(entry.name)}'s ${ZONES[hit[0]].toLowerCase()}${cards.length ? ` (${cards.length})` : ''}</b>`
+        + (cards.length
+          ? `<ol>${shown.map((n) => `<li>${esc(n)}</li>`).join('')}</ol>${cards.length > shown.length ? `<i>and ${cards.length - shown.length} more</i>` : ''}`
+          : '<i>No cards seen going here yet.</i>');
+    }
+    pop.hidden = false;
+    const w = pop.offsetWidth;
+    const h = pop.offsetHeight;
+    pop.style.left = `${Math.max(8, Math.min(window.innerWidth - w - 8, ev.clientX + 16))}px`;
+    pop.style.top = `${Math.max(8, Math.min(window.innerHeight - h - 8, ev.clientY + 16))}px`;
+  }
+  function hideZonePop() {
+    const pop = $('zone-pop');
+    if (pop) pop.hidden = true;
   }
 
   // ---------- eraser ----------
@@ -375,6 +575,7 @@ window.Marks = (() => {
   function stickerHtml(s) {
     const total = totalPT(s.items);
     const parts = [];
+    if (s.unsure) parts.push('<div class="st-ask">Is it this? <button data-ask="yes" title="Yes: keep this tag">✓</button><button data-ask="no" title="No: remove it">✕</button></div>');
     if (total) parts.push(`<div class="st-pt">${esc(total)}</div>`);
     for (const it of s.items) {
       if (it.type === 'card') {
@@ -408,6 +609,7 @@ window.Marks = (() => {
         e.stickers.appendChild(el);
       }
       positionSticker(el, s);
+      el.classList.toggle('unsure', !!s.unsure);
       if (!el.classList.contains('resizing')) el.style.setProperty('--sticker-own', String(s.scale || 1));
       const html = stickerHtml(s);
       if (el._html !== html) {
@@ -475,7 +677,9 @@ window.Marks = (() => {
     el.addEventListener('dblclick', (ev) => ev.stopPropagation());
     el.addEventListener('pointerdown', (ev) => {
       ev.stopPropagation();
-      start = { x: ev.clientX, y: ev.clientY, moved: false };
+      // Which button was pressed is noted here: once the pointer is captured, the release is
+      // reported on the sticker itself, not on the button.
+      start = { x: ev.clientX, y: ev.clientY, moved: false, ask: ev.target.closest('[data-ask]')?.dataset.ask || null };
       // Corner handle: resize instead of move. Size follows the pointer's distance from the center.
       if (ev.target.closest('.st-resize')) {
         const r = el.getBoundingClientRect();
@@ -516,9 +720,15 @@ window.Marks = (() => {
         return;
       }
       const moved = start.moved;
+      const answer = start.ask;
       start = null;
       el.classList.remove('dragging');
       hidePreview();
+      if (answer && !moved) {
+        // Answering the app's guess.
+        act(answer === 'yes' ? { type: 'stickerConfirm', id: el.dataset.id } : { type: 'stickerRemove', id: el.dataset.id });
+        return;
+      }
       if (moved) {
         const r = el.parentElement.getBoundingClientRect();
         act({ type: 'stickerMove', id: el.dataset.id, x: (ev.clientX - r.left) / r.width, y: (ev.clientY - r.top) / r.height });
@@ -858,7 +1068,10 @@ window.Marks = (() => {
       }
       drawCanvas(tile);
       renderStickers(tile);
+      tiles.get(tile).zonePending = null;
+      renderZones(tile);
     }
+    renderZonePanel();
     window.Tracker?.sync(next);
     // Refresh the editor unless the user is typing in it.
     const active = document.activeElement;
@@ -903,13 +1116,17 @@ window.Marks = (() => {
   }
 
   // Put a card sticker at a spot on a player's video (from the Identify tool).
+  // Resolves with nothing; returns the new sticker's id (so the caller can offer Undo).
   function placeCard(tileName, x, y, card) {
-    act({ type: 'stickerAdd', id: newId(), target: tileName, x, y, items: [{ ...card, type: 'card' }] });
+    const id = newId();
+    act({ type: 'stickerAdd', id, target: tileName, x, y, items: [{ ...card, type: 'card' }] });
+    return id;
   }
+  const removeSticker = (id) => act({ type: 'stickerRemove', id });
 
   function openLookup() {
     openEditor({ mode: 'lookup' });
   }
 
-  return { init, attachTile, detachTile, update, showCard, showPreview, hidePreview, tileAt, dropCard, placeCard, openLookup, setLive };
+  return { init, attachTile, detachTile, update, showCard, showPreview, hidePreview, tileAt, dropCard, placeCard, removeSticker, openLookup, setLive };
 })();

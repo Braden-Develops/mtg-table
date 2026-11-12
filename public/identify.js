@@ -5,6 +5,8 @@
 window.Identify = (() => {
   const TOPIC = 'identify';
   const OWNER_TIMEOUT_MS = 3000;
+  const AUTO_SCORE = 7.5; // a match this strong...
+  const AUTO_LEAD = 2.5; // ...and this far ahead of the next card is tagged without asking
   const CROP = 0.55; // crop a square this fraction of the frame's short side around the click
 
   let code = null;
@@ -149,7 +151,49 @@ window.Identify = (() => {
     current.status = error ? 'error' : 'done';
     current.error = error;
     current.result = result;
+    // Far ahead of every other card: tag it without asking. (Right matches score 10-13 with the
+    // runner-up near 5; wrong ones have so far stayed under 7 and within about 1 of the next.)
+    const [top, next] = result?.matches || [];
+    if (!error && result?.found && result.confident && top.score >= AUTO_SCORE && top.score - (next?.score ?? 0) >= AUTO_LEAD) {
+      const stickerId = window.Marks.placeCard(tileName, x, y, top.card);
+      feedback(result.id, top.card.name, 'auto');
+      $('identify-dialog').close();
+      autoToast(top.card, () => window.Marks.removeSticker(stickerId), () => {
+        // Not right: take the tag off and show the usual choices.
+        window.Marks.removeSticker(stickerId);
+        current = mine;
+        render();
+        $('identify-dialog').showModal();
+      });
+      return;
+    }
     render();
+  }
+
+  // "Tagged X" with a way back, for a card tagged without asking.
+  let autoTimer = null;
+  function autoToast(card, undo, change) {
+    let el = $('identify-toast');
+    if (!el) {
+      el = document.createElement('div');
+      el.id = 'identify-toast';
+      el.className = 'track-toast read-toast';
+      document.body.appendChild(el);
+    }
+    el.replaceChildren();
+    const span = document.createElement('span');
+    span.textContent = `Tagged ${card.name}.`;
+    el.appendChild(span);
+    for (const [label, fn] of [['Undo', undo], ['Not it', change]]) {
+      const b = document.createElement('button');
+      b.type = 'button';
+      b.textContent = label;
+      b.onclick = () => { el.hidden = true; fn(); };
+      el.appendChild(b);
+    }
+    el.hidden = false;
+    clearTimeout(autoTimer);
+    autoTimer = setTimeout(() => { el.hidden = true; }, 6000);
   }
 
   // ---------- results dialog ----------
