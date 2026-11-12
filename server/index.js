@@ -57,6 +57,9 @@ const LIVEKIT_CLIENT = path.join(ROOT, 'node_modules', 'livekit-client', 'dist',
 const ORT_DIR = path.join(ROOT, 'node_modules', 'onnxruntime-web', 'dist');
 const ORT_FILES = /^(ort\.wasm\.min\.mjs|ort-wasm-simd-threaded\.(mjs|wasm))$/;
 const POSE_FILES = { 'pose.onnx': 'mtg_4kp_s_r4b.onnx', 'mtg_4kp_s_r4b.onnx.data': 'mtg_4kp_s_r4b.onnx.data' };
+// The whole-picture card finder is our own model (see training/), small enough to live in the
+// repository, so it deploys with the code.
+const FINDER_FILE = path.join(ROOT, 'cardfinder', 'card_finder.onnx');
 const TOKEN_TTL = '8h';
 const STATS_LOG = path.join(ROOT, 'data', 'stats.jsonl');
 
@@ -270,6 +273,10 @@ async function handle(req, res) {
   }
   // The card corner model, for tracking cards under stickers in the camera owner's browser.
   const modelMatch = p.match(/^\/api\/models\/([\w.-]+)$/);
+  if (req.method === 'GET' && modelMatch && modelMatch[1] === 'cards.onnx') {
+    if (!guest(url.searchParams.get('code'), 'model', 20)) return;
+    return sendBig(res, FINDER_FILE, 'private, max-age=604800, immutable');
+  }
   if (req.method === 'GET' && modelMatch && POSE_FILES[modelMatch[1]]) {
     if (!guest(url.searchParams.get('code'), 'model', 20)) return;
     return sendBig(res, path.join(ROOT, 'models', POSE_FILES[modelMatch[1]]), 'private, max-age=604800, immutable');

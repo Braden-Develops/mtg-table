@@ -4,11 +4,32 @@
 const API = 'https://api.scryfall.com';
 const HEADERS = { 'User-Agent': 'MTGTable/0.1 (private game table)', Accept: 'application/json' };
 const MIN_GAP_MS = 120;
+const SEARCH_GAP_MS = 550; // searches are limited much harder than single-card lookups
+const RETRIES = 2; // after "too many requests"
 const CACHE_MAX = 2000;
 
 const cache = new Map(); // url -> { at, value }
 let queue = Promise.resolve();
 let lastRequest = 0;
+let holdUntil = 0; // Scryfall said to slow down: nothing goes out before this
+
+// One request on the polite queue's turn. When Scryfall answers "too many requests" (429), wait as
+// long as it says (or 20 s, then 40 s) and ask again: giving up at once left most of a deck's
+// printings unlisted, because every request after the first refusal was refused too.
+async function politeFetch(url, options) {
+  const gap = url.includes('/cards/search') ? SEARCH_GAP_MS : MIN_GAP_MS;
+  for (let attempt = 0; ; attempt++) {
+    const wait = Math.max(lastRequest + gap, holdUntil) - Date.now();
+    if (wait > 0) await new Promise((r) => setTimeout(r, wait));
+    lastRequest = Date.now();
+    const res = await fetch(url, options);
+    if (res.status !== 429 || attempt >= RETRIES) return res;
+    const asked = Number(res.headers.get('retry-after'));
+    const pause = Math.min(120, asked > 0 ? asked : 20 * (attempt + 1));
+    console.warn(`Scryfall asked us to slow down; waiting ${pause} s`);
+    holdUntil = Date.now() + pause * 1000;
+  }
+}
 
 function remember(key, value) {
   cache.set(key, { at: Date.now(), value });
@@ -22,10 +43,7 @@ function scryfallGet(path) {
   const hit = cache.get(url);
   if (hit && Date.now() - hit.at < 24 * 3600_000) return Promise.resolve(hit.value);
   const run = queue.then(async () => {
-    const wait = lastRequest + MIN_GAP_MS - Date.now();
-    if (wait > 0) await new Promise((r) => setTimeout(r, wait));
-    lastRequest = Date.now();
-    const res = await fetch(url, { headers: HEADERS });
+    const res = await politeFetch(url, { headers: HEADERS });
     const body = await res.json().catch(() => ({}));
     // Only real answers are remembered: a rate limit or an outage must not stick for a day.
     return res.status === 200 || res.status === 404 ? remember(url, { status: res.status, body }) : { status: res.status, body };
@@ -37,10 +55,7 @@ function scryfallGet(path) {
 // POST helper on the same polite queue (used for batch card lookups; not cached).
 function scryfallPost(path, payload) {
   const run = queue.then(async () => {
-    const wait = lastRequest + MIN_GAP_MS - Date.now();
-    if (wait > 0) await new Promise((r) => setTimeout(r, wait));
-    lastRequest = Date.now();
-    const res = await fetch(API + path, {
+    const res = await politeFetch(API + path, {
       method: 'POST',
       headers: { ...HEADERS, 'Content-Type': 'application/json' },
       body: JSON.stringify(payload),

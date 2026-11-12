@@ -7,6 +7,10 @@
    the corners are off by 10-30% of the card. Measured on pictures with known corners:
      card upright in a 9:16 frame, 30-70% of its width, within about 20 degrees: ~1 px, score ~1.0
      the same card in a square frame, or turned 45 degrees: 10-100 px, score anywhere
+     the same card a quarter of its width or more off the frame's centre: not seen at all (on a
+     printed playmat the model then often draws a card in the middle anyway, scoring up to 0.85)
+   It refines a card it is pointed at; it does not search. Finding where a card went is the
+   caller's job (tracker.js matches the card's own picture across the camera frame).
    So we never trust a look at an arbitrary crop. A "frame" is a rotated rectangle of the picture,
    { cx, cy, th, w, h }, th in radians (0 = upright), which the caller's `run(frame)` squashes to the
    model's square input. locate() tries frames until the model sees a card the way it was trained to:
@@ -98,11 +102,17 @@
      opts.bounds: [width, height] of the picture; outlines sticking out of it are ignored.
      opts.near: also accept a card whose outline doesn't contain `at` but whose centre is this close.
      opts.maxRuns: model runs to spend.
+     opts.quick: take a card the first frame shows clearly, without re-framing on it for a second
+       look (the browser, where a look takes a third of a second; the outline is a pixel or two
+       looser, which matters for matching the picture but not for following or finding a card).
+     opts.skip: leave out this many of the first frames (a retry carrying on where the last stopped;
+       with a known size the order is: centred 2, askew 4, towards each side 8, towards each corner 8,
+       then other sizes).
      Resolves with { card, sure, runs, others }: card is the best outline (pose + score) or null;
      sure says the model saw it in the trained framing with a high score (twice, if not very high);
      others are different outlines at the point that also looked good, best first. */
   async function locate(run, at, opts = {}) {
-    const { size = 0, span = 0, near = 0, bounds = null, angle = null, only = false, maxRuns = 10, accept = ACCEPT, floor = FLOOR } = opts;
+    const { size = 0, span = 0, near = 0, bounds = null, angle = null, only = false, maxRuns = 10, skip = 0, quick = false, accept = ACCEPT, floor = FLOOR } = opts;
     let runs = 0;
     const kept = []; // outlines seen in the trained framing: { ...pose, score, sure }
     const inPicture = (p) => !bounds || p.quad.every(([x, y]) => x > -p.a * 0.1 && y > -p.a * 0.1 && x < bounds[0] + p.a * 0.1 && y < bounds[1] + p.a * 0.1);
@@ -165,13 +175,45 @@
     //    card shows, however faintly, is followed up by re-framing on it.
     if (!sizes.length) sizes = [span * 0.27 || 150, span * 0.46 || 255, span * 0.16 || 90];
     const tries = [];
-    for (const turns of only ? [first] : [first, [first[0] + Math.PI / 4, first[0] - Math.PI / 4]]) {
-      for (const a of sizes) for (const th of turns) tries.push({ cx: centreAt[0], cy: centreAt[1], th, w: a / FILL, h: (a / FILL) * ASPECT });
+    // u, v: how far the frame's centre is from the point, in card widths across and along the card.
+    const frame = (a, th, u = 0, v = 0) => {
+      const c = Math.cos(th);
+      const s = Math.sin(th);
+      tries.push({ cx: centreAt[0] + (u * c - v * s) * a, cy: centreAt[1] + (u * s + v * c) * a, th, w: a / FILL, h: (a / FILL) * ASPECT });
+    };
+    const centred = (list, turns) => { for (const a of list) for (const th of turns) frame(a, th); };
+    // The model only sees a card whose centre is within about a quarter of its width of the frame's
+    // centre (a third along its length); further off it finds nothing, or imagines a card in the
+    // middle. A point near the card's edge needs frames shifted towards each side.
+    const SIDES = [[-0.35, 0], [0.35, 0], [0, -0.42], [0, 0.42]];
+    const CORNERS = [[-0.35, -0.42], [0.35, -0.42], [0.35, 0.42], [-0.35, 0.42]];
+    const shifted = (a, turns, by) => { for (const th of turns) for (const [u, v] of by) frame(a, th, u, v); };
+    // The model copes with a card turned up to about 20 degrees from the frame. Cards put down by
+    // hand lie at any angle, so after the two likely ones come the four in between (30 degrees
+    // either side of each): together no card is more than 15 degrees off some frame.
+    const askew = [Math.PI / 6, -Math.PI / 6, Math.PI / 3, -Math.PI / 3].map((d) => first[0] + d);
+    if (only) centred(sizes, first);
+    else if (size) {
+      // The size is known: the card lying askew or the point being off-centre is likelier than
+      // the size being wrong.
+      centred(sizes.slice(0, 1), first);
+      centred(sizes.slice(0, 1), askew);
+      shifted(sizes[0], first, SIDES);
+      shifted(sizes[0], first, CORNERS);
+      centred(sizes.slice(1), first);
+    } else {
+      centred(sizes, first);
+      centred(sizes.slice(0, 1), askew);
+      centred(sizes.slice(1), askew);
+      shifted(sizes[0], first, SIDES);
     }
-    for (const f of tries) {
+    for (const f of tries.slice(skip)) {
       if (runs >= maxRuns) break;
       const p = (await look(f))[0];
-      if (p && p.score >= 0.35 && await settle(p)) break;
+      if (!p || p.score < 0.35) continue;
+      // Already seen as trained, and the model is certain: good enough when looks are slow.
+      if (quick && trained(p, f) && p.shape > 0.6 && p.score >= 0.9) { keep(p, true); break; }
+      if (await settle(p)) break;
     }
     return result();
   }

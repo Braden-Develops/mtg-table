@@ -1,0 +1,12 @@
+cards/
+bg/
+data/
+runs/
+real/
+preview/
+venv/
+*.pt
+*.onnx
+*.jsonl.gz
+*.log
+cards.yaml

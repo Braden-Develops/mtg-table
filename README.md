@@ -112,6 +112,35 @@ Set your home network to **Private** in Windows settings, and allow both program
 - Scryfall requests go through the server (`server/scryfall.js`), which caches them and stays under
   Scryfall's rate limit.
 
+## Card finder, zones and automatic tags
+
+**The card finder** (`cardfinder/card_finder.onnx`, about 11 MB, in the repository) outlines every
+card in a camera picture in one look of about 150 ms, wherever and however it lies, including one
+held in a hand. It runs in each player's own browser (`public/track-worker.js`). Everything below
+uses it; on a server without the file the app falls back to pointing the corner model at guesses.
+
+- **Held cards:** hold a card up; once two looks see it in the same place it is read (about a
+  second), and when you put it down it gets its sticker as soon as two looks see a new card lying
+  still on the table.
+- **Cards on the table are tagged by themselves** (eye menu → "Tag cards on my table"): each card
+  with no sticker is looked up once. A clear match gets its tag; a likely one gets a tag marked
+  "Is it this? ✓ ✕"; anything else is left alone. The same goes for the Identify tool: a clear
+  match is tagged without the dialog, with Undo and "Not it".
+- **Zones** (tools bar): drag a box on your own camera for your command zone, library, graveyard
+  and exile. Drag a box to move it, an edge or corner to resize it. A stickered card that comes to
+  rest in a box (or is last seen at one) loses its sticker, the log says where it went, and it is
+  added to that pile's list. Hover a box for the list; click it to open the pile in the side panel
+  (hover a card to see it, click to put it back on the table). Boxes are kept across games.
+- **Stickers after a shuffle:** when several stickers lose their cards at once, each card goes to
+  the sticker it fits best, by the card's colours as well as its outline.
+
+**Training it** (`training/`, needs Python and a GPU; nothing here runs on the server):
+`fetch.py` downloads card pictures from Scryfall and background photos, `gen.py` pastes cards
+onto playmats, desks and photos as a webcam would see them (sleeves, glare, hands, blur),
+`train.py` trains a small pose model on them, `look.py` draws what a trained model finds on real
+camera frames. The model is trained with Ultralytics (AGPL-3.0), which matters if this code is
+ever distributed. Face-down cards are not in the training pictures yet.
+
 ## Card recognition
 
 Needs the two model files in `models/` (see Deploying). How a lookup works (`server/recognize.js`):

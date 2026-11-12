@@ -22,8 +22,9 @@ for (const folder of ['identify-fixtures', 'identify-log']) {
     const dir = path.join(root, id);
     const label = read(path.join(dir, 'label.json'));
     const result = read(path.join(dir, 'result.json'));
-    // Only answers the player vouched for (placed the card, or said yes), not just opened to look at.
-    if (!label?.name || label.how === 'open' || !result?.candidates?.length || !fs.existsSync(path.join(dir, 'crop.jpg'))) continue;
+    // Only answers the player vouched for (placed the card, or said yes), not just opened to look
+    // at, and not ones the app tagged by itself.
+    if (!label?.name || label.how === 'open' || label.how === 'auto' || !result?.candidates?.length || !fs.existsSync(path.join(dir, 'crop.jpg'))) continue;
     cases.push({ id: `${folder === 'identify-log' ? 'log' : 'fix'}/${id}`, dir, name: label.name, result });
   }
 }
