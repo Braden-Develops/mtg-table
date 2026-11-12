@@ -114,6 +114,24 @@ window.Marks = (() => {
       window.AutoRead?.setTagging(!window.AutoRead.isTagging());
       showAutoTag();
     });
+    // Both of those at once, for players who want no card read unless they ask (the Identify
+    // tool still works, and stickers placed by hand still follow their cards).
+    const showAuto = () => {
+      const on = !!window.AutoRead?.isEnabled() || !!window.AutoRead?.isTagging();
+      $('auto-recog-btn').classList.toggle('on', on);
+      $('auto-recog-btn').textContent = on ? 'Automatic card recognition' : 'Automatic card recognition off';
+    };
+    showAuto();
+    $('auto-recog-btn').addEventListener('click', () => {
+      const on = !(window.AutoRead?.isEnabled() || window.AutoRead?.isTagging());
+      window.AutoRead?.setEnabled(on);
+      window.AutoRead?.setTagging(on);
+      showReadHeld();
+      showAutoTag();
+      showAuto();
+    });
+    $('read-held-btn').addEventListener('click', showAuto);
+    $('auto-tag-btn').addEventListener('click', showAuto);
     // Tags of cards that can't be seen: kept (the default) or removed after a few seconds.
     const showRemoveLost = () => {
       const on = !!window.Tracker?.removesLost();
