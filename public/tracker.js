@@ -1289,6 +1289,7 @@ window.Tracker = (() => {
   try { debugOn = localStorage.getItem('cardDebug') === '1'; } catch { /* ignore */ }
   let debugTimer = null;
   let debugBusy = false;
+  let thumbCanvas = null;
   function setDebug(on) {
     debugOn = !!on;
     try { localStorage.setItem('cardDebug', debugOn ? '1' : '0'); } catch { /* ignore */ }
@@ -1341,6 +1342,37 @@ window.Tracker = (() => {
         g.arc(c.quad[0][0] * s, c.quad[0][1] * s, 3, 0, 7);
         g.fill();
         g.fillText(`${c.score.toFixed(2)} sh${p.shape.toFixed(2)}`, p.cx * s - 24, Math.min(...c.quad.map((q) => q[1])) * s - 4);
+      }
+      // Known by sight (autoread.js): under each card on the table, the little picture its
+      // fingerprint is made from and which known card that looks like (green: taken as that
+      // card; grey: not sure). Down the right-hand side, every card learnt so far with its
+      // fingerprints' pictures.
+      const sight = window.AutoRead?.sight?.();
+      if (sight) {
+        const tile = (thumb, x, y, scale) => {
+          if (!thumb) return;
+          if (!thumbCanvas) { thumbCanvas = document.createElement('canvas'); thumbCanvas.width = 32; thumbCanvas.height = 45; }
+          thumbCanvas.getContext('2d').putImageData(new ImageData(thumb, 32, 45), 0, 0);
+          g.drawImage(thumbCanvas, x, y, 32 * scale, 45 * scale);
+        };
+        g.imageSmoothingEnabled = false;
+        for (const c of sight.seen) {
+          const x = c.cx * w;
+          const y = (c.cy + c.b * 0.5) * h + 14;
+          tile(c.thumb, x - 34, y, 0.6);
+          g.fillStyle = c.as?.sure ? '#4f8' : '#bbb';
+          g.fillText(c.as ? `${c.as.name.slice(0, 18)} ${c.as.score.toFixed(2)} +${c.as.lead.toFixed(2)}` : 'no cards learnt yet', x - 12, y + 12);
+        }
+        let gy = 30;
+        g.fillStyle = '#cfe';
+        g.fillText(`learnt by sight: ${sight.known.length}`, w - 190, gy - 6);
+        for (const card of sight.known) {
+          if (gy > h - 60) break;
+          card.thumbs.forEach((thumb, i) => tile(thumb, w - 190 + i * 22, gy, 0.6));
+          g.fillStyle = '#cfe';
+          g.fillText(card.name.slice(0, 16), w - 190 + Math.max(1, card.thumbs.length) * 22 + 4, gy + 16);
+          gy += 31;
+        }
       }
       const k = work ? (work.vw / work.w) * s : 0;
       const lines = [`finder ${hasFinder ? `${lastScanMs} ms, ${cards.length} outlines` : detector === 'ready' ? 'not on this server' : detector}  corner model ${lastDetMs || '-'} ms`];

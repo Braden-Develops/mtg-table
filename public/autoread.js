@@ -531,6 +531,10 @@ window.AutoRead = (() => {
       const under = t.on && label.get(t.on);
       // On its own card: nothing to do but note how the card looks now (new spot, new light).
       if (under?.sure && under.name === t.name) { learn(t.card, prints.get(t.on)); continue; }
+      // Its card by a nose: the tag is being followed on this card (t.seen) and nothing else it
+      // knows looks more like it, but the fingerprint on file is a poor one (taken with a hand in
+      // the way, say). A better one is taken now.
+      if (under && under.name === t.name && t.seen && under.score >= 0.5) { learn(t.card, prints.get(t.on)); continue; }
       if (!gallery.has(t.name)) continue; // never learnt what this one looks like: can't say
       if (t.on && !under?.sure) continue; // can't tell what is under it: leave it be
       // A different card is under it, or none: its own card, if in view without its tag, gets it.
@@ -593,7 +597,8 @@ window.AutoRead = (() => {
     }
     lastSight = {
       known: gallery.size, moved, bySight, conflicts, loose: loose.size, labelled: [...label.values()].filter((k) => k?.sure).length, cards: table.length,
-      // (for the debug panel: what each card on the table looks most like, and by how much)
+      // (for the debug overlay: each card's little picture, what it looks most like, and by how much)
+      seen: table.map((c) => ({ cx: c.cx, cy: c.cy, b: c.b, thumb: prints.get(c)?.[2] || null, as: label.get(c) })),
       looks: table.map((c) => { const k = label.get(c); return k ? `${k.name} ${k.score.toFixed(2)}+${k.lead.toFixed(2)}${k.sure ? '' : '?'}` : '-'; }),
     };
     nextBoard = now + (untagged.length > settled.length || inFlight || moved ? 250 : 700);
@@ -728,7 +733,16 @@ window.AutoRead = (() => {
     for (const c of cards) {
       const corners = window.CardFind.uprightCorners(c.quad.map(([x, y]) => [x * fw, y * fh]));
       const I = CM.integral(CM.warp(rgb, fw, fh, corners, FP_W, FP_H), FP_W, FP_H);
-      out.set(c, [CM.lowFeature(CM.shrink(I)), CM.lowFeature(CM.shrink(I, 0, 0, 0, 0, true))]);
+      const small = CM.shrink(I); // the 32x45 picture the fingerprint is made from
+      // (third: that little picture, kept only to show in the card debug overlay)
+      const thumb = new Uint8ClampedArray(CM.LW * CM.LH * 4);
+      for (let i = 0; i < CM.LW * CM.LH; i++) {
+        thumb[i * 4] = small[i * 3];
+        thumb[i * 4 + 1] = small[i * 3 + 1];
+        thumb[i * 4 + 2] = small[i * 3 + 2];
+        thumb[i * 4 + 3] = 255;
+      }
+      out.set(c, [CM.lowFeature(small), CM.lowFeature(CM.shrink(I, 0, 0, 0, 0, true)), thumb]);
     }
     return out;
   }
@@ -756,7 +770,11 @@ window.AutoRead = (() => {
     if (!print || !card?.name) return;
     let g = gallery.get(card.name);
     if (!g) gallery.set(card.name, g = { card: { ...card, type: 'card' }, samples: [] });
-    if (g.samples.some((sample) => likeness(print, sample) > 0.95)) return; // nothing new in it
+    const twin = g.samples.find((sample) => likeness(print, sample) > 0.95);
+    if (twin) {
+      if (!twin[2]) twin[2] = print[2]; // (one kept over a reload has no picture to show: lend it this one)
+      return; // nothing new in it
+    }
     g.samples.push(print);
     if (g.samples.length > SAMPLES) g.samples.splice(1, 1); // the first stays; the oldest of the rest goes
     clearTimeout(saveTimer);
@@ -807,6 +825,7 @@ window.AutoRead = (() => {
   async function learnAt(x, y, card) {
     const video = localVideo();
     if (!video?.videoWidth || !window.Tracker.hasFinder?.()) return;
+    for (let i = 0; i < 40 && !(calmSince && performance.now() - calmSince > 400); i++) await new Promise((r) => setTimeout(r, 100));
     const cards = await window.Tracker.findCards(video, 0.5, 0.5, 1);
     const aspect = video.videoWidth / video.videoHeight;
     const at = (cards || []).filter((c) => c.sure && c.shape > 0.75)
@@ -1134,5 +1153,7 @@ window.AutoRead = (() => {
   let lastLand = null;
   const debug = () => ({ enabled, phase, card: hold?.card?.name, failedChecks, hasBg: !!bg, last, lastLand, lastSpots, timing, tagging, lastBoard, lastCheck, lastSight, inFlight, known: known.length, ignored: ignored.length });
 
-  return { init, setEnabled, isEnabled: () => enabled, setTagging, isTagging: () => tagging, alternatives, rejected, learnAt, debug, patches, cardSpots };
+  return { init, setEnabled, isEnabled: () => enabled, setTagging, isTagging: () => tagging, alternatives, rejected, learnAt, debug,
+    // For the card debug overlay: every known card's fingerprints as little pictures, and the last look's cards.
+    sight: () => ({ known: [...gallery].map(([name, g]) => ({ name, thumbs: g.samples.map((sample) => sample[2] || null) })), seen: lastSight?.seen || [] }), patches, cardSpots };
 })();
