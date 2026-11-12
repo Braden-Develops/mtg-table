@@ -645,8 +645,11 @@ window.AutoRead = (() => {
     if (pile && (window.Tracker.piles?.()[pile] || []).at(-1)?.name === top.card.name) return;
     // Sure by score; or its tag was on this table a moment ago (knocked off while cards were
     // moved about), so there is nothing to ask.
-    const back = !!window.Tracker.wasHere?.(top.card.name, RECENT_MS);
-    const sure = back || (r.confident && top.score >= AUTO_SCORE && lead >= AUTO_LEAD);
+    // Sure by score only. (A guess used to count as sure when a tag of that name had just left the
+    // table, and a waiting tag of that name was moved onto any guess: between them they put a
+    // confirmed Termagant Swarm tag on a card that was only a 5.7 guess. Cards that come back are
+    // now known by sight; a guess stays a question.)
+    const sure = r.confident && top.score >= AUTO_SCORE && lead >= AUTO_LEAD;
     // Named for sure: from now on this card is known by how it looks through this camera.
     if (sure) learn(top.card, print);
     // The card may have got a tag while this lookup was under way: one card, one card tag.
@@ -662,7 +665,7 @@ window.AutoRead = (() => {
     // With two copies of a card, the covered copy gets a tag again by sight once it shows.)
     const set = mine.find((t) => !t.unsure && t.name === top.card.name && (loose.has(t.id) || !t.seen));
     if (set) loose.delete(set.id);
-    const waiting = set || window.Tracker.liftedNamed?.(top.card.name);
+    const waiting = sure ? set || window.Tracker.liftedNamed?.(top.card.name) : null;
     if (waiting) {
       act({ type: 'stickerMove', id: waiting.id, x: c.cx, y: c.cy });
       lastBoard.tagged = 'its waiting tag moved here';
@@ -671,8 +674,8 @@ window.AutoRead = (() => {
     const id = Math.random().toString(36).slice(2, 10);
     remember(id, r);
     act({ type: 'stickerAdd', id, target: me, x: c.cx, y: c.cy, items: [{ ...top.card, type: 'card' }], unsure: !sure });
-    if (sure && !back) window.Identify.feedback(r.id, top.card.name, 'auto');
-    lastBoard.tagged = back ? 'back again' : sure ? 'sure' : 'asked';
+    if (sure) window.Identify.feedback(r.id, top.card.name, 'auto');
+    lastBoard.tagged = sure ? 'sure' : 'asked';
   }
 
   // A lookup's answer for a tag that was moved to another card (v: { id, name, x, y }). If the
@@ -705,7 +708,6 @@ window.AutoRead = (() => {
     });
   }
   let lastCheck = null;
-  const RECENT_MS = 90000; // a tag gone from my table this recently comes back without a question
 
   // ---------- what each card looks like here ----------
   // Naming a card from reference pictures is the hard, uncertain step: a webcam picture of a
