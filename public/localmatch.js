@@ -74,7 +74,7 @@ window.LocalMatch = (() => {
         const m = e.data;
         if (m.t === 'progress') { s.done = m.done; s.total = m.total; s.cached = m.cached; show(); }
         if (m.t === 'result') { pending.get(m.id)?.(m.result); pending.delete(m.id); }
-        if (m.t === 'refs') { s.refs = { cards: m.cards, references: m.references }; refsHash = m.hash; }
+        if (m.t === 'refs') { s.refs = { cards: m.cards, references: m.references }; refsHash = m.hash; s.fetching = false; }
       });
       post({ t: 'init', code, files: info.files });
       s.on = (await once('ready')).on;
@@ -97,7 +97,7 @@ window.LocalMatch = (() => {
       s.state = 'ready';
       show();
       await refresh();
-      timer = setInterval(() => refresh().catch(() => {}), 20000);
+      poll();
     } catch (err) {
       s.state = 'failed';
       s.mode = 'server';
@@ -108,12 +108,28 @@ window.LocalMatch = (() => {
 
   // The reference pack follows the decks at the table: fetch it again when they change.
   async function refresh() {
-    if (s.state !== 'ready' || s.mode !== 'local') return;
+    if (s.state !== 'ready') return;
     info = await getInfo();
-    if (info.refs && info.refs.hash !== refsHash) {
+    s.waiting = info.waiting || 0;
+    if (s.mode === 'local' && info.refs && info.refs.hash !== refsHash) {
       refsHash = info.refs.hash; // (set now, so a slow download isn't started twice)
+      s.fetching = true;
       post({ t: 'refs', code, hash: info.refs.hash });
     }
+  }
+  // Often while the server is still learning a new deck's cards, now and then otherwise.
+  function poll() {
+    clearTimeout(timer);
+    timer = setTimeout(() => refresh().catch(() => {}).finally(poll), learning() ? 3000 : 20000);
+  }
+  // A deck was just loaded: the server is learning its cards, and until it has (and, when cards
+  // are read here, until this computer has the new references) a lookup can only answer with a
+  // card it already knows: a wrong one. Vault 21 was tagged "Mountain" that way.
+  const learning = () => s.waiting > 0 || !!s.fetching;
+  function deckChanged() {
+    if (s.state !== 'ready') return;
+    s.waiting = Math.max(s.waiting || 0, 1);
+    refresh().catch(() => {}).finally(poll);
   }
 
   const ready = () => s.state === 'ready' && s.mode === 'local' && !!s.refs;
@@ -138,5 +154,5 @@ window.LocalMatch = (() => {
     return refresh();
   }
 
-  return { start, ready, identify, refresh, force, status: () => ({ ...s }) };
+  return { start, ready, identify, refresh, force, learning, deckChanged, status: () => ({ ...s }) };
 })();
