@@ -3,6 +3,11 @@
 A self-hosted video table for playing paper Magic remotely: 1080p at about 5 Mbps per player
 (SpellTable sends about 960×720 at roughly 1 Mbps), with private invite links.
 
+Unofficial fan project, not affiliated with or endorsed by Wizards of the Coast. Magic: The
+Gathering and its card names and art are property of Wizards of the Coast. Card data and images
+come from [Scryfall](https://scryfall.com). Free software under the [AGPL-3.0](LICENSE): see
+[License](#license).
+
 ## How it works
 
 - **LiveKit server** (`bin/livekit-server.exe`) relays video between players. It's open source (Apache-2.0).
@@ -181,8 +186,9 @@ lookups.
 `fetch.py` downloads card pictures from Scryfall and background photos, `gen.py` pastes cards
 onto playmats, desks and photos as a webcam would see them (sleeves, glare, hands, blur),
 `train.py` trains a small pose model on them, `look.py` draws what a trained model finds on real
-camera frames. The model is trained with Ultralytics (AGPL-3.0), which matters if this code is
-ever distributed. Face-down cards are not in the training pictures yet.
+camera frames. The model is trained with Ultralytics from its `yolo11n-pose` weights, both
+AGPL-3.0, which is why this project is AGPL-3.0 too (see [License](#license)). Face-down cards
+are not in the training pictures yet.
 
 ## Card recognition
 
@@ -296,3 +302,26 @@ tries again.
 Some browsers (and embedded previews) refuse the self-signed certificate. Start the server with
 `MTG_DEV_HTTP=8080 npm start` to also serve plain HTTP on `http://127.0.0.1:8080`. It only listens on
 this computer, never on the network.
+
+## License
+
+Copyright (C) 2026 the MTG Table contributors.
+
+This program is free software: you can redistribute it and/or modify it under the terms of the
+GNU Affero General Public License, version 3, as published by the Free Software Foundation. It is
+distributed in the hope that it will be useful, but WITHOUT ANY WARRANTY. See [LICENSE](LICENSE).
+
+In short: you may use, change and host it freely. If you give a changed version to others, or run
+one as a table other people play at, you must offer them its source under the same license. The
+join page links to the source for that reason: point `SOURCE_URL` in `public/join.html` at your
+own repository if you host a changed copy.
+
+What is not covered by that license:
+
+- **The card finder** (`cardfinder/card_finder.onnx`) was trained with Ultralytics from its
+  `yolo11n-pose` weights and is AGPL-3.0 on Ultralytics' terms.
+- **The corner and embedding models** (`models/`, not in this repository) are third-party models
+  under their own (MIT) licenses.
+- **Magic: The Gathering** card names, art and symbols belong to Wizards of the Coast. No card
+  images are in this repository; they are fetched from Scryfall when the table runs. This project
+  is free fan content under Wizards' Fan Content Policy and must stay free of charge.

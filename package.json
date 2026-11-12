@@ -10,7 +10,7 @@
     "start": "node server/index.js"
   },
   "author": "",
-  "license": "UNLICENSED",
+  "license": "AGPL-3.0-only",
   "dependencies": {
     "livekit-client": "^2.23.0",
     "livekit-server-sdk": "^2.19.2",
