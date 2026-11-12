@@ -500,9 +500,34 @@ window.AutoRead = (() => {
     const tags = window.Tracker.myTags?.() || [];
     const reach = (t, c) => far({ cx: t.x, cy: t.y }, c);
     for (const t of tags) t.on = table.filter((c) => reach(t, c) < c.b * 0.6).sort((p, q) => reach(t, p) - reach(t, q))[0] || null;
+    // One card, one card tag. Two on the same card means something went wrong: the one that
+    // belongs stays (by sight if the card is known, else the one that was confirmed first), a
+    // suggestion among the rest is dropped, and a confirmed tag is set loose to find its own card,
+    // by sight below or by name when the untagged cards are looked up again.
+    let conflicts = 0;
+    for (const c of table) {
+      const here = tags.filter((t) => t.on === c);
+      if (here.length < 2) continue;
+      conflicts++;
+      const k = label.get(c);
+      const keep = (k?.sure && here.find((t) => !t.unsure && t.name === k.name)) || here.find((t) => !t.unsure) || here[0];
+      for (const t of here) {
+        if (t === keep) continue;
+        t.on = null;
+        if (t.unsure || t.name === keep.name) { act({ type: 'stickerRemove', id: t.id }); t.gone = true; } else loose.add(t.id);
+      }
+    }
+    for (const id of [...loose]) {
+      const t = tags.find((o) => o.id === id);
+      if (!t || t.gone) loose.delete(id); // removed since
+      else if (t.on && !tags.some((o) => o !== t && !o.gone && o.on === t.on)) loose.delete(id); // alone on a card again
+      else t.on = null;
+    }
+    // Something was wrong: cards looked at before may be the ones missing their tags.
+    if (conflicts) known = known.filter((spot) => tags.some((t) => !t.gone && t.on && far(spot, t.on) < t.on.a * 0.3));
     let moved = 0;
     for (const t of tags) {
-      if (t.unsure) continue;
+      if (t.unsure || t.gone) continue;
       const under = t.on && label.get(t.on);
       // On its own card: nothing to do but note how the card looks now (new spot, new light).
       if (under?.sure && under.name === t.name) { learn(t.card, prints.get(t.on)); continue; }
@@ -520,8 +545,7 @@ window.AutoRead = (() => {
       t.y = home.cy;
       moved++;
     }
-    const untagged = table.filter((c) => inPlay(c) && !leftAlone(c) && !tags.some((t) => t.on === c)
-      && !spots.some((sp) => far({ cx: sp.x, cy: sp.y }, c) < c.b * 0.6)
+    const untagged = table.filter((c) => inPlay(c) && !leftAlone(c) && !tags.some((t) => !t.gone && t.on === c)
       && !known.some((k) => far(k, c) < c.a * 0.3) && !inZone(c, 'library') && !inZone(c, 'command'));
     const settled = untagged.filter((c) => boardSeen.some((o) => far(o, c) < c.a * 0.08));
     boardSeen = untagged;
@@ -567,7 +591,11 @@ window.AutoRead = (() => {
       const print = prints.get(c);
       lookUp(video, c, (r) => tagFrom(c, r, inZone, print));
     }
-    lastSight = { known: gallery.size, moved, bySight, labelled: [...label.values()].filter((k) => k?.sure).length, cards: table.length };
+    lastSight = {
+      known: gallery.size, moved, bySight, conflicts, loose: loose.size, labelled: [...label.values()].filter((k) => k?.sure).length, cards: table.length,
+      // (for the debug panel: what each card on the table looks most like, and by how much)
+      looks: table.map((c) => { const k = label.get(c); return k ? `${k.name} ${k.score.toFixed(2)}+${k.lead.toFixed(2)}${k.sure ? '' : '?'}` : '-'; }),
+    };
     nextBoard = now + (untagged.length > settled.length || inFlight || moved ? 250 : 700);
   }
 
@@ -600,9 +628,17 @@ window.AutoRead = (() => {
     const sure = back || (r.confident && top.score >= AUTO_SCORE && lead >= AUTO_LEAD);
     // Named for sure: from now on this card is known by how it looks through this camera.
     if (sure) learn(top.card, print);
-    // A tag of this card is waiting for it (the card was picked up and has been put down here):
-    // that tag, with whatever counters it carries, moves to the card.
-    const waiting = window.Tracker.liftedNamed?.(top.card.name);
+    // The card may have got a tag while this lookup was under way: one card, one card tag.
+    const video = localVideo();
+    const aspect = video?.videoWidth ? video.videoWidth / video.videoHeight : 16 / 9;
+    const mine = window.Tracker.myTags?.() || [];
+    if (mine.some((t) => !loose.has(t.id) && Math.hypot((t.x - c.cx) * aspect, t.y - c.cy) < c.b * 0.6)) { lastBoard.tagged = 'already has a tag'; return; }
+    // A tag of this card is waiting for it (the card was picked up and has been put down here, or
+    // its tag was found sharing another card): that tag, with whatever counters it carries, moves
+    // to the card.
+    const set = mine.find((t) => loose.has(t.id) && !t.unsure && t.name === top.card.name);
+    if (set) loose.delete(set.id);
+    const waiting = set || window.Tracker.liftedNamed?.(top.card.name);
     if (waiting) {
       act({ type: 'stickerMove', id: waiting.id, x: c.cx, y: c.cy });
       lastBoard.tagged = 'its waiting tag moved here';
@@ -669,6 +705,7 @@ window.AutoRead = (() => {
   let fpCanvas = null;
   let lastSight = null;
   const vetted = new Set(); // tags whose card has been looked up once to learn it
+  const loose = new Set(); // confirmed tags found sharing a card with another: looking for their own
 
   // Fingerprints of cards the finder outlined: Map(card -> [feature, feature turned upside down]).
   function fingerprints(video, cards) {

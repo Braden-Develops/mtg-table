@@ -1370,7 +1370,7 @@ window.Tracker = (() => {
       if (a) {
         lines.push(`held-card reader: ${a.enabled ? a.phase : 'off'}${a.card ? ` (${a.card})` : ''}  misses ${a.failedChecks}${a.timing ? `  last read: find ${a.timing.find} ms + lookup ${a.timing.read ?? '?'} ms` : ''}`);
         if (a.lastLand?.finder) lines.push(`last put-down: ${a.lastLand.ms} ms after the read`);
-        if (a.lastSight) lines.push(`known by sight: ${a.lastSight.known} cards learnt; this look ${a.lastSight.labelled} of ${a.lastSight.cards} recognised, ${a.lastSight.moved} tags moved, ${a.lastSight.bySight} tagged with no lookup`);
+        if (a.lastSight) lines.push(`known by sight: ${a.lastSight.known} cards learnt; this look ${a.lastSight.labelled} of ${a.lastSight.cards} recognised, ${a.lastSight.moved} tags moved, ${a.lastSight.bySight} tagged with no lookup${a.lastSight.loose ? `, ${a.lastSight.loose} tags looking for their card` : ''}\n  ${(a.lastSight.looks || []).join(' | ')}`);
         if (a.ignored) lines.push(`left alone (✕ on a suggestion): ${a.ignored} things`);
         lines.push(`table tagging: ${a.tagging ? 'on' : 'off'}, ${a.known} spots looked up${a.lastBoard ? `  last: ${a.lastBoard.top || 'no match'} (next ${a.lastBoard.next ?? '-'}) ${a.lastBoard.tagged || 'left alone'}` : ''}`);
       }
