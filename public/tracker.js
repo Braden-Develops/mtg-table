@@ -583,6 +583,16 @@ window.Tracker = (() => {
   let reqId = 0;
   const pending = new Map();
 
+  // The join page loads the models before the table is entered (app.js waits for this), so the
+  // first seconds at the table aren't spent starting them. Resolves when they are ready or have failed.
+  let loadWaiters = [];
+  const loadSettled = () => { for (const done of loadWaiters) done(detector); loadWaiters = []; };
+  function preload(inviteCode) {
+    code ??= inviteCode;
+    loadDetector();
+    if (detector !== 'loading') return Promise.resolve(detector);
+    return new Promise((resolve) => loadWaiters.push(resolve));
+  }
   function loadDetector() {
     if (detector !== 'off') return;
     detector = 'loading';
@@ -600,10 +610,12 @@ window.Tracker = (() => {
         hasFinder = !!m.finder;
         console.info(hasFinder ? 'Card finder loaded (whole-picture model)' : 'No whole-picture card finder on this server: using the corner model alone');
         console.info(`Card tracking ready (model loaded in ${m.ms} ms, ${m.threads || 1} thread${m.threads > 1 ? 's' : ''})`);
+        loadSettled();
       } else if (m.t === 'error') {
         detector = 'failed';
         console.warn('Card tracking unavailable:', m.message);
         worker.terminate();
+        loadSettled();
       } else if (m.t === 'result') {
         if (m.message) console.warn('Card finder error:', m.message);
         const done = pending.get(m.id);
@@ -616,6 +628,7 @@ window.Tracker = (() => {
     worker.onerror = (err) => {
       detector = 'failed';
       console.warn('Card tracking unavailable:', err.message);
+      loadSettled();
     };
     worker.postMessage({ t: 'load', code });
   }
@@ -1434,5 +1447,5 @@ window.Tracker = (() => {
     }
   }
 
-  return { init, setRoom, onData, sync, setEnabled, isEnabled: () => enabled, status, debug, probe, noteIdentified, findCards, stickerSpots, cardSize, hasFinder: () => hasFinder, load: () => loadDetector(), setDebug, isDebug: () => debugOn, colours, hasState: () => !!state, myTags, removesLost: () => removesLost, setRemovesLost, liftedNamed, wasHere, toVerify, verified, markVerify, stickerNamed, zones: () => state?.zones?.[me] || {}, piles: () => state?.piles?.[me] || {} };
+  return { init, setRoom, onData, sync, setEnabled, isEnabled: () => enabled, status, debug, probe, noteIdentified, findCards, stickerSpots, cardSize, hasFinder: () => hasFinder, load: () => loadDetector(), preload, setDebug, isDebug: () => debugOn, colours, hasState: () => !!state, myTags, removesLost: () => removesLost, setRemovesLost, liftedNamed, wasHere, toVerify, verified, markVerify, stickerNamed, zones: () => state?.zones?.[me] || {}, piles: () => state?.piles?.[me] || {} };
 })();

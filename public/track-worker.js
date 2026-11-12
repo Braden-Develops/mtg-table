@@ -36,6 +36,10 @@ async function load(code) {
   try {
     finder = await ort.InferenceSession.create(await fetchModel('cards.onnx', code), { executionProviders: ['wasm'], graphOptimizationLevel: 'all' });
   } catch { finder = null; }
+  // A model's first run is much slower than the rest: have it here, not on the first look at the table.
+  if (finder) {
+    try { await finder.run({ [finder.inputNames[0]]: new ort.Tensor('float32', new Float32Array(3 * FW * FH).fill(0.45), [1, 3, FH, FW]) }); } catch { /* the first real look will say */ }
+  }
   return Math.round(performance.now() - t0);
 }
 

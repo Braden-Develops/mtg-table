@@ -19,6 +19,7 @@
   let previewVideo = null; // LocalVideoTrack shown in the lobby
   let room = null;
   let statsTimer = null;
+  const prepTimes = {}; // how long card matching and card tracking took to start on the join page
   const tiles = new Map(); // participant identity -> tile element
   const prevStats = new Map(); // track sid -> { bytes, frames, ts }
 
@@ -38,8 +39,29 @@
     if (savedQuality && QUALITY[savedQuality]) $('quality-select').value = savedQuality;
 
     $('lobby-body').hidden = false;
-    // Card recognition: fetch the models and see whether this computer or the server is faster.
-    window.LocalMatch?.start(code);
+    // Card recognition and card tracking start here, and the table can't be joined until both are
+    // ready (or have failed: the table works without them). Joining used to start card tracking,
+    // which froze the first seconds at the table. Neither is waited on for more than three minutes.
+    const joinBtn = $('join-btn');
+    joinBtn.disabled = true;
+    joinBtn.textContent = 'Getting ready…';
+    const began = performance.now();
+    const step = (name, work) => Promise.race([
+      Promise.resolve().then(work).catch(() => {}).then(() => { prepTimes[name] = Math.round(performance.now() - began); }),
+      new Promise((resolve) => setTimeout(resolve, 180000)),
+    ]);
+    const prep = $('prep-status');
+    const waitingFor = new Set(['card matching', 'card tracking']);
+    const say = () => { if (prep) { prep.hidden = !waitingFor.size; prep.textContent = `Starting ${[...waitingFor].join(' and ')}…`; } };
+    say();
+    Promise.all([
+      step('card matching', () => window.LocalMatch?.start(code)).then(() => { waitingFor.delete('card matching'); say(); }),
+      step('card tracking', () => window.Tracker?.preload?.(code)).then(() => { waitingFor.delete('card tracking'); say(); }),
+    ]).then(() => {
+      console.info('Ready to join (ms since the page opened):', JSON.stringify(prepTimes));
+      joinBtn.disabled = false;
+      joinBtn.textContent = 'Join table';
+    });
     await startPreview(store.get('cameraId'));
     await fillDeviceLists();
 
@@ -99,6 +121,10 @@
     const btn = $('join-btn');
     btn.disabled = true;
     btn.textContent = 'Joining…';
+    // How long each step of joining took, for the console (and window.joinTimes): a slow join names itself.
+    const t0 = performance.now();
+    const times = {};
+    const mark = (name) => { times[name] = Math.round(performance.now() - t0); };
     try {
       const res = await fetch('/api/token', {
         method: 'POST',
@@ -107,6 +133,7 @@
       });
       const auth = await res.json();
       if (!res.ok) throw new Error(auth.error || 'Could not get a ticket for the table.');
+      mark('ticket');
 
       const q = QUALITY[$('quality-select').value];
       room = new Room({
@@ -118,6 +145,7 @@
       window.Identify.setRoom(room);
       window.Tracker.setRoom(room);
       await room.connect(auth.serverUrl, auth.token);
+      mark('connected');
 
       if (!previewVideo) await startPreview($('camera-select').value);
       if (previewVideo) {
@@ -134,6 +162,7 @@
         });
         window.Adjust.setLocalTrack(previewVideo);
       }
+      mark('camera published');
 
       $('lobby').hidden = true;
       $('room').hidden = false;
@@ -142,6 +171,9 @@
       window.Game.start(code, auth.name);
       renderAll();
       statsTimer = setInterval(updateStats, 2000);
+      mark('table shown');
+      window.joinTimes = { ...times, prep: prepTimes };
+      console.info('Joined (ms from the click):', JSON.stringify(times));
     } catch (err) {
       console.error(err);
       showLobbyError(err.message || String(err));
