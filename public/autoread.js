@@ -476,7 +476,10 @@ window.AutoRead = (() => {
     const table = cards.filter(onTable);
     // Forget spots whose card has gone, so a card put there later is looked at.
     known = known.filter((k) => table.some((c) => far(k, c) < c.a * 0.3));
-    const untagged = table.filter((c) => !spots.some((s) => far({ cx: s.x, cy: s.y }, c) < c.b * 0.6)
+    // With a play area marked, only cards in it (or in the graveyard or exile) are looked at: not
+    // the deck box, a pile of spare cards, or whatever the finder makes of the picture's edge.
+    const inPlay = (c) => !zones.play || inZone(c, 'play') || inZone(c, 'graveyard') || inZone(c, 'exile');
+    const untagged = table.filter((c) => inPlay(c) && !spots.some((s) => far({ cx: s.x, cy: s.y }, c) < c.b * 0.6)
       && !known.some((k) => far(k, c) < c.a * 0.3) && !inZone(c, 'library') && !inZone(c, 'command'));
     const settled = untagged.filter((c) => boardSeen.some((o) => far(o, c) < c.a * 0.08));
     boardSeen = untagged;
@@ -568,7 +571,11 @@ window.AutoRead = (() => {
     const size = window.Tracker.cardSize?.();
     const onTable = (c) => c.sure && c.shape > 0.7 && (size ? c.b > size * 0.6 && c.b < size * 1.6 : c.b < HELD_MIN * 0.9);
     const spots = window.Tracker.stickerSpots?.() || [];
+    // A held card is put down in the play area or on a pile, if those are marked.
+    const zones = window.Tracker.zones?.() || {};
+    const within = (c, zone) => { const b = zones[zone]; return b && c.cx >= b[0] && c.cx <= b[2] && c.cy >= b[1] && c.cy <= b[3]; };
     const fresh = cards.filter((c) => onTable(c)
+      && (!zones.play || ['play', 'graveyard', 'exile', 'command', 'library'].some((zone) => within(c, zone)))
       && !hold.table.some((o) => far(o, c) < c.a * 0.6)
       && !spots.some((s) => far({ cx: s.x, cy: s.y }, c) < c.b * 0.6));
     const before = hold.landing || [];

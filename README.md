@@ -126,8 +126,9 @@ uses it; on a server without the file the app falls back to pointing the corner 
   with no sticker is looked up once. A clear match gets its tag; a likely one gets a tag marked
   "Is it this? ✓ ✕"; anything else is left alone. The same goes for the Identify tool: a clear
   match is tagged without the dialog, with Undo and "Not it".
-- **Zones** (tools bar): drag a box on your own camera for your command zone, library, graveyard
-  and exile. Drag a box to move it, an edge or corner to resize it. A stickered card that comes to
+- **Zones** (tools bar): drag a box on your own camera for your play area, command zone, library,
+  graveyard and exile. With a play area marked, only cards in it (or in the graveyard or exile)
+  are tagged by themselves. Drag a box to move it, an edge or corner to resize it. A stickered card that comes to
   rest in a box (or is last seen at one) loses its sticker, the log says where it went, and it is
   added to that pile's list. Hover a box for the list; click it to open the pile in the side panel
   (hover a card to see it, click to put it back on the table). Boxes are kept across games.

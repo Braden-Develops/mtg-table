@@ -339,6 +339,9 @@ body[data-tool="zone"] .zone-bar { display: flex; }
 .zone-box[data-zone="exile"] { border-color: rgba(255, 190, 90, .45); }
 .zone-box[data-zone="library"] { border-color: rgba(120, 190, 255, .45); }
 .zone-box[data-zone="command"] { border-color: rgba(190, 140, 255, .5); }
+.zone-box[data-zone="play"] { border-style: dotted; border-color: rgba(120, 230, 150, .3); border-radius: 12px; }
+.zone-box[data-zone="play"] span { left: auto; right: 4px; }
+body[data-tool="zone"] .zone-box[data-zone="play"] { background: none; }
 body[data-tool="zone"] .zone-box { border-width: 2px; border-color: #fff; background: rgba(255, 255, 255, .06); }
 body[data-tool="zone"] .zone-box span { color: #fff; background: rgba(0, 0, 0, .7); }
 /* Hovering a pile lists what has gone into it. */

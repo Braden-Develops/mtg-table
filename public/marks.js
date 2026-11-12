@@ -16,7 +16,8 @@ window.Marks = (() => {
   let drawColor = null; // chosen in the tools bar; defaults to the player's own color
   let drawSize = 1;
   let pendingItems = null; // items waiting to be placed (from card lookup)
-  const ZONES = { command: 'Command zone', library: 'Library', graveyard: 'Graveyard', exile: 'Exile' };
+  const ZONES = { play: 'Play area', command: 'Command zone', library: 'Library', graveyard: 'Graveyard', exile: 'Exile' };
+  const isPile = (zone) => ZONES[zone] && zone !== 'play'; // the play area has no list of cards
   let zoneKind = 'graveyard'; // which pile the zone tool is marking
   const tiles = new Map(); // tile -> { name, layer, canvas, stickers, video }
 
@@ -313,14 +314,17 @@ window.Marks = (() => {
         const my = pt[1] * r.height;
         const EDGE = 12;
         let grab = null;
-        for (const [zone, b] of Object.entries(state?.zones?.[me] || {})) {
+        // Smallest box first, so a pile inside the play area is the one grabbed.
+        const area = ([, b]) => (b[2] - b[0]) * (b[3] - b[1]);
+        for (const [zone, b] of Object.entries(state?.zones?.[me] || {}).sort((p, q) => area(q) - area(p))) {
           if (!ZONES[zone]) continue;
           const [x0, y0, x1, y1] = [b[0] * r.width, b[1] * r.height, b[2] * r.width, b[3] * r.height];
           if (mx < x0 - EDGE || mx > x1 + EDGE || my < y0 - EDGE || my > y1 + EDGE) continue;
           const ex = Math.abs(mx - x0) < EDGE ? 0 : Math.abs(mx - x1) < EDGE ? 2 : -1;
           const ey = Math.abs(my - y0) < EDGE ? 1 : Math.abs(my - y1) < EDGE ? 3 : -1;
-          grab = { zone, mode: ex >= 0 || ey >= 0 ? 'resize' : 'move', ex, ey, start: b.slice() };
-          if (grab.mode === 'resize') break;
+          // (Later boxes are smaller and win; an edge of any box wins over the inside of another.)
+          const hit = { zone, mode: ex >= 0 || ey >= 0 ? 'resize' : 'move', ex, ey, start: b.slice() };
+          if (!grab || hit.mode === 'resize' || grab.mode !== 'resize') grab = hit;
         }
         if (grab) pickZone(grab.zone);
         entry.zoneDrag = grab ? { ...grab, from: pt, box: grab.start.slice() } : { zone: zoneKind, mode: 'new', from: pt, box: [pt[0], pt[1], pt[0], pt[1]] };
@@ -423,7 +427,7 @@ window.Marks = (() => {
     const x = (ev.clientX - r.left) / r.width;
     const y = (ev.clientY - r.top) / r.height;
     return Object.entries(state?.zones?.[entry.name] || {})
-      .find(([zone, b]) => ZONES[zone] && x >= b[0] && x <= b[2] && y >= b[1] && y <= b[3])?.[0] || null;
+      .find(([zone, b]) => isPile(zone) && x >= b[0] && x <= b[2] && y >= b[1] && y <= b[3])?.[0] || null;
   }
 
   // Clicking a zone opens its pile in the side panel, like a deck: every card that went there this
@@ -465,7 +469,7 @@ window.Marks = (() => {
     const x = (ev.clientX - r.left) / r.width;
     const y = (ev.clientY - r.top) / r.height;
     const hit = entry.zoneDrag ? null : Object.entries(state?.zones?.[entry.name] || {})
-      .find(([zone, b]) => ZONES[zone] && x >= b[0] && x <= b[2] && y >= b[1] && y <= b[3]);
+      .find(([zone, b]) => isPile(zone) && x >= b[0] && x <= b[2] && y >= b[1] && y <= b[3]);
     entry.layer.parentElement.style.cursor = hit && tool === 'select' ? 'pointer' : '';
     if (!hit || ev.target.closest('.sticker')) return hideZonePop();
     let pop = $('zone-pop');
