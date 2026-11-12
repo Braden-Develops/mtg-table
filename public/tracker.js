@@ -1127,5 +1127,5 @@ window.Tracker = (() => {
     }
   }
 
-  return { init, setRoom, onData, sync, setEnabled, isEnabled: () => enabled, status, debug, probe, noteIdentified, findCards, stickerSpots, cardSize, hasFinder: () => hasFinder, colours, zones: () => state?.zones?.[me] || {} };
+  return { init, setRoom, onData, sync, setEnabled, isEnabled: () => enabled, status, debug, probe, noteIdentified, findCards, stickerSpots, cardSize, hasFinder: () => hasFinder, load: () => loadDetector(), colours, zones: () => state?.zones?.[me] || {} };
 })();

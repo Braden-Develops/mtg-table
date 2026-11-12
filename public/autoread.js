@@ -71,6 +71,9 @@ window.AutoRead = (() => {
   }
 
   function start() {
+    // Have the card models ready: tagging table cards waits for the finder, and until now nothing
+    // loaded it before the first sticker or held card.
+    window.Tracker?.load?.();
     if (!timer) timer = setInterval(tick, 1000 / FPS);
   }
 
@@ -448,6 +451,8 @@ window.AutoRead = (() => {
   const BOARD_PER_MIN = 8; // lookups a minute, leaving room for held-up cards and Identify clicks
   const AUTO_SCORE = 7.5;
   const AUTO_LEAD = 2.5;
+  const ASK_SCORE = 5; // a guess at least this strong and this far ahead is shown as a question
+  const ASK_LEAD = 0.5;
   let tagging = true;
   try { tagging = localStorage.getItem('autoTag') !== '0'; } catch { /* ignore */ }
   let nextBoard = 0;
@@ -484,8 +489,12 @@ window.AutoRead = (() => {
     nextBoard = performance.now() + 300;
     const [top, next] = r?.matches || [];
     lastBoard = { at: [+c.cx.toFixed(2), +c.cy.toFixed(2)], top: top && `${top.card.name} ${top.score.toFixed(1)}`, next: next && +next.score.toFixed(1), found: !!r?.found, weak: !!r?.weak };
-    if (!tagging || !r?.found || !top || r.weak) return; // nothing in the decks stands out: leave it
-    const sure = r.confident && top.score >= AUTO_SCORE && top.score - (next?.score ?? 0) >= AUTO_LEAD;
+    // Nothing in the decks stands out: leave it. (On the server's first night every "best guess"
+    // from 5.3 up was right, some only 0.9 ahead of the next card; a card that isn't in any deck
+    // tops out around 4.5.)
+    const lead = top ? top.score - (next?.score ?? 0) : 0;
+    if (!tagging || !r?.found || !top || top.score < ASK_SCORE || lead < ASK_LEAD) return;
+    const sure = r.confident && top.score >= AUTO_SCORE && lead >= AUTO_LEAD;
     const id = Math.random().toString(36).slice(2, 10);
     act({ type: 'stickerAdd', id, target: me, x: c.cx, y: c.cy, items: [{ ...top.card, type: 'card' }], unsure: !sure });
     if (sure) window.Identify.feedback(r.id, top.card.name, 'auto');
