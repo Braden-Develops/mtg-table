@@ -177,7 +177,8 @@ window.AutoRead = (() => {
 
     if (phase === 'idle') {
       // Nothing moving: a good moment to look over the table for cards that have no tag yet.
-      if (tagging && calmFor > 500 && now >= nextBoard && window.Tracker.hasFinder?.()) {
+      // (Not before the table's state has arrived: the zone boxes say which cards to skip.)
+      if (tagging && calmFor > 500 && now >= nextBoard && window.Tracker.hasFinder?.() && window.Tracker.hasState?.()) {
         busy = true;
         boardLook(video).catch((err) => console.warn('Tagging table cards:', err)).finally(() => { busy = false; });
         return;

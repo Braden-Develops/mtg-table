@@ -227,6 +227,64 @@ window.Tracker = (() => {
     return best;
   }
 
+  // ---------- covered, or gone? ----------
+  // A sticker whose card can't be seen is removed after a while: the card left the table. Unless
+  // something is in the way (an arm reaching across, a hand hovering). The difference shows around
+  // the card, not on it: when a card is picked up the table around it looks as before; under an
+  // arm the surroundings have changed too. So each sticker remembers the brightness of a ring of
+  // points around its card while it follows it, and while lost that ring is compared with now.
+  function ringSample(pose, a, b) {
+    const { w, h, rgb } = work;
+    if (!rgb) return null;
+    const out = [];
+    const c = Math.cos(pose.th);
+    const s = Math.sin(pose.th);
+    for (let j = -3; j <= 3; j++) {
+      for (let i = -3; i <= 3; i++) {
+        const u = (i / 3) * 1.15 * a;
+        const v = (j / 3) * 0.95 * b;
+        if (Math.abs(u) < a * 0.6 && Math.abs(v) < b * 0.6) continue; // on the card itself
+        const x = Math.round(pose.cx + u * c - v * s);
+        const y = Math.round(pose.cy + u * s + v * c);
+        if (x < 1 || y < 1 || x > w - 2 || y > h - 2) { out.push(-1); continue; } // off the picture
+        let sum = 0;
+        for (let dy = -1; dy <= 1; dy++) {
+          for (let dx = -1; dx <= 1; dx++) {
+            const q = ((y + dy) * w + x + dx) * 4;
+            sum += rgb[q] * 0.3 + rgb[q + 1] * 0.59 + rgb[q + 2] * 0.11;
+          }
+        }
+        out.push(sum / 9);
+      }
+    }
+    return out;
+  }
+  // Has the table around this sticker's card changed since it was last followed? (0-1: the share of
+  // the ring that looks different, after allowing for the camera re-exposing.)
+  function ringChanged(t) {
+    if (!t.ring || !work?.rgb) return 0;
+    const now = ringSample(t.ringPose, t.a, t.b);
+    let sa = 0;
+    let sb = 0;
+    let n = 0;
+    for (let i = 0; i < now.length; i++) {
+      if (now[i] < 0 || t.ring[i] < 0) continue;
+      sa += t.ring[i];
+      sb += now[i];
+      n++;
+    }
+    if (n < 8) return 0;
+    const gain = Math.min(1.6, Math.max(0.6, sb > 1 ? sa / sb : 1));
+    let changed = 0;
+    for (let i = 0; i < now.length; i++) {
+      if (now[i] < 0 || t.ring[i] < 0) continue;
+      if (Math.abs(t.ring[i] - now[i] * gain) > 26) changed++;
+    }
+    return changed / n;
+  }
+  const COVERED = 0.3; // this much of the ring changed: something is over the card
+  const UNCOVERED_WAIT = 2500; // after it clears, the card gets this long to be found again
+
   // ---------- templates ----------
   // Sample points over the middle of the card, in card units scaled by its size.
   function buildTemplate(t, pose) {
@@ -458,6 +516,12 @@ window.Tracker = (() => {
     }
     t.pose = { cx: best.cx, cy: best.cy, th: best.th };
     if (best.score >= STAY) t.good = { ...t.pose };
+    // Remember the table around the card (see "covered, or gone?"), about once a second while it rests.
+    if (best.score >= STAY && now - (t.lastMove || 0) > 600 && now - (t.ringAt || 0) > 1000) {
+      t.ring = ringSample(t.pose, t.a, t.b);
+      t.ringPose = { ...t.pose };
+      t.ringAt = now;
+    }
     t.lostMs = 0;
     t.recoverTries = 0;
     t.scans = 0;
@@ -877,6 +941,11 @@ window.Tracker = (() => {
     const lostCount = following.filter((t) => t.lostMs > 0).length;
     const disturbed = following.length >= 3 && lostCount / following.length >= 0.7;
     for (const t of following) {
+      if (!t.lostMs) { t.covered = 0; continue; }
+      // Something is in the way (an arm across the table): the card hasn't gone anywhere we know of.
+      t.covered = ringChanged(t);
+      if (t.covered >= COVERED) t.coveredAt = now;
+      if (now - (t.coveredAt || 0) < UNCOVERED_WAIT) continue;
       if (t.lostMs > REMOVE_AFTER && t.recoverTries >= 2 && t.scans >= (hasFinder ? 3 : SCAN_TURNS.length) && !disturbed) removeLost(t);
     }
     // One whole-picture search per tick at most, for a card lost a little while.
@@ -1197,7 +1266,7 @@ window.Tracker = (() => {
         g.stroke();
         g.setLineDash([]);
         g.fillStyle = g.strokeStyle;
-        g.fillText(`${t.id.slice(0, 3)} ${(t.score ?? 0).toFixed(2)}${t.lostMs > 0 ? ` lost ${(t.lostMs / 1000).toFixed(1)}s` : ''}`, ...corner(-t.a / 2, t.b / 2 + 11 / k));
+        g.fillText(`${t.id.slice(0, 3)} ${(t.score ?? 0).toFixed(2)}${t.lostMs > 0 ? ` lost ${(t.lostMs / 1000).toFixed(1)}s${t.covered >= COVERED ? ' COVERED' : ''} ring ${(t.covered || 0).toFixed(2)}` : ''}`, ...corner(-t.a / 2, t.b / 2 + 11 / k));
       }
       const all = [...tracks.values()];
       lines.push(`stickers ${all.filter((t) => t.phase === 'track').length} following, ${all.filter((t) => t.lostMs > 0).length} lost, ${all.filter((t) => t.phase !== 'track').length} no card  tick ${costMs.toFixed(1)} ms`);
@@ -1227,5 +1296,5 @@ window.Tracker = (() => {
     }
   }
 
-  return { init, setRoom, onData, sync, setEnabled, isEnabled: () => enabled, status, debug, probe, noteIdentified, findCards, stickerSpots, cardSize, hasFinder: () => hasFinder, load: () => loadDetector(), setDebug, isDebug: () => debugOn, colours, zones: () => state?.zones?.[me] || {}, piles: () => state?.piles?.[me] || {} };
+  return { init, setRoom, onData, sync, setEnabled, isEnabled: () => enabled, status, debug, probe, noteIdentified, findCards, stickerSpots, cardSize, hasFinder: () => hasFinder, load: () => loadDetector(), setDebug, isDebug: () => debugOn, colours, hasState: () => !!state, zones: () => state?.zones?.[me] || {}, piles: () => state?.piles?.[me] || {} };
 })();
