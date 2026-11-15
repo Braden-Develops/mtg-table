@@ -263,6 +263,11 @@ window.Marks = (() => {
     entry.video.addEventListener('loadedmetadata', () => layout(tile));
     entry.video.addEventListener('resize', () => layout(tile));
     new ResizeObserver(() => layout(tile)).observe(tile);
+    let zoomTimer = null;
+    tile.addEventListener('zoomchange', () => {
+      clearTimeout(zoomTimer);
+      zoomTimer = setTimeout(() => layout(tile), 150);
+    });
     wireLayer(tile, entry);
     tile.addEventListener('mousemove', (ev) => hoverZone(entry, ev));
     // In Select, a click on a zone opens its pile (before the tile's own click, which enlarges it).
@@ -300,7 +305,9 @@ window.Marks = (() => {
     });
     // Stickers grow and shrink with the video, so they cover the same part of the card at any size.
     e.layer.style.setProperty('--sticker-auto', String(Math.min(1.8, Math.max(0.55, rect.width / 700))));
-    const dpr = window.devicePixelRatio || 1;
+    // Zoomed in (zoom.js), the drawings are magnified too: draw them finer so they stay sharp.
+    const zoom = Math.min(window.Zoom?.level(tile) || 1, 4096 / Math.max(1, rect.width));
+    const dpr = (window.devicePixelRatio || 1) * Math.max(1, zoom);
     e.canvas.width = Math.max(1, Math.round(rect.width * dpr));
     e.canvas.height = Math.max(1, Math.round(rect.height * dpr));
     drawCanvas(tile);
