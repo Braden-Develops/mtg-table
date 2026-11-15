@@ -227,6 +227,7 @@
     });
     tiles.set(participant.identity, tile);
     $('grid').appendChild(tile);
+    window.Zoom.attachTile(tile); // first, so the end of a drag never counts as a click on the tile
     window.Game.attachTile(tile, participant.name || participant.identity);
     window.Adjust.attachTile(tile, participant.name || participant.identity, participant.isLocal);
     return tile;
@@ -235,6 +236,7 @@
   function removeTile(identity) {
     const tile = tiles.get(identity);
     if (tile) window.Game.detachTile(tile);
+    if (tile) window.Zoom.detachTile(tile);
     tile?.remove();
     tiles.delete(identity);
   }
