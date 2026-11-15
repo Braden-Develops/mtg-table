@@ -503,9 +503,16 @@ async function deleteVoice(config, room) {
 async function makeTableChannels(config, room) {
   const g = settings(config).board.guildId;
   const make = (body) => discordApi(config, 'POST', `/guilds/${g}/channels`, body);
-  const cat = await make({ name: `\u{1F3B2} ${room}`.slice(0, 100), type: 4 });
-  const text = await make({ name: `${room}-chat`.slice(0, 100), type: 0, parent_id: cat.id, topic: `Chat for table ${room}` });
-  const voice = await make({ name: `${room} voice`.slice(0, 100), type: 2, parent_id: cat.id });
+  // Whatever an earlier try already made is used, not made again. A try can fail half way, or
+  // Discord can answer too late and make the channel anyway; without this every retry (one every
+  // 15 s) left another set of channels behind.
+  const existing = await discordApi(config, 'GET', `/guilds/${g}/channels`);
+  const name = `\u{1F3B2} ${room}`.slice(0, 100);
+  const taken = new Set(Object.values(settings(config).voice || {}).map((o) => o.categoryId));
+  const cat = existing.find((c) => c.type === 4 && c.name === name && !taken.has(c.id)) || await make({ name, type: 4 });
+  const child = (type) => existing.find((c) => c.type === type && c.parent_id === cat.id);
+  const text = child(0) || await make({ name: `${room}-chat`.slice(0, 100), type: 0, parent_id: cat.id, topic: `Chat for table ${room}` });
+  const voice = child(2) || await make({ name: `${room} voice`.slice(0, 100), type: 2, parent_id: cat.id });
   const v = { id: voice.id, textId: text.id, categoryId: cat.id };
   await postLinkCard(config, room, v);
   return v;
@@ -587,7 +594,31 @@ async function syncVoice(config) {
 
 let lastBoard = '';
 let boardTimer = null;
-export async function refreshBoard(config, force = false) {
+// One refresh at a time: two at once (the 15 s tick and the one right after an invite or a new
+// table) each saw a table without channels and each made a set.
+let refreshing = null;
+let refreshAgain = null; // { force }: someone asked while one was under way
+export function refreshBoard(config, force = false) {
+  if (refreshing) {
+    refreshAgain = { force: force || !!refreshAgain?.force };
+    return refreshing;
+  }
+  refreshing = (async () => {
+    try {
+      await refreshBoardNow(config, force);
+      while (refreshAgain) {
+        const next = refreshAgain;
+        refreshAgain = null;
+        await refreshBoardNow(config, next.force);
+      }
+    } finally {
+      refreshing = null;
+      refreshAgain = null;
+    }
+  })();
+  return refreshing;
+}
+async function refreshBoardNow(config, force) {
   const b = settings(config).board;
   if (!b || !settings(config).token) return;
   if (b.version !== BOARD_VERSION || !b.guildId) {
